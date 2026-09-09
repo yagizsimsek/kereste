@@ -1,0 +1,32 @@
+name: OGM Sabah Radari
+
+on:
+  schedule:
+    # Her gün UTC saatiyle 05:00'da çalışır (Türkiye saatiyle 08:00 eder)
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+    # Bu satır sayesinde GitHub sitesinden butona basıp manuel de test edebilirsin
+
+jobs:
+  run-radar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Dosyalari Cek
+        uses: actions/checkout@v3
+
+      - name: Python Kur
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Gerekli Kutuphaneleri Yukle
+        run: pip install requests beautifulsoup4 gspread oauth2client
+
+      - name: Radar Botunu Calistir
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
+          GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+        run: python radar_bot.py
