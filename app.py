@@ -30,6 +30,50 @@ def isletme_kisalt(text):
     parcalar = t.split()
     return parcalar[-1] if parcalar else t
 
+# --- OPENROUTESERVICE (OTOMATİK KM HESAPLAMA) ---
+try:
+    ORS_API_KEY = st.secrets["ORS_API_KEY"]
+except Exception:
+    ORS_API_KEY = None
+
+ORS_BASLANGIC_NOKTASI = "Sakarya, Türkiye"
+
+def ors_km_hesapla(hedef_yer):
+    """OpenRouteService ile Sakarya'dan hedef yere sürüş mesafesini (km) hesaplar.
+    API anahtarı yoksa veya herhangi bir adımda hata olursa sessizce None döner
+    (çağıran taraf bu durumda manuel girişe / mesafe tablosuna düşer)."""
+    if not ORS_API_KEY or not hedef_yer or hedef_yer == "Bilinmeyen İşletme":
+        return None
+    try:
+        def geokodla(yer_adi):
+            r = requests.get(
+                "https://api.openrouteservice.org/geocode/search",
+                params={"api_key": ORS_API_KEY, "text": yer_adi, "size": 1, "boundary.country": "TR"},
+                timeout=10,
+            )
+            r.raise_for_status()
+            data = r.json()
+            return data["features"][0]["geometry"]["coordinates"]  # [lon, lat]
+
+        baslangic = geokodla(ORS_BASLANGIC_NOKTASI)
+        hedef = geokodla(f"{hedef_yer}, Türkiye")
+
+        r = requests.get(
+            "https://api.openrouteservice.org/v2/directions/driving-car",
+            params={
+                "api_key": ORS_API_KEY,
+                "start": f"{baslangic[0]},{baslangic[1]}",
+                "end": f"{hedef[0]},{hedef[1]}",
+            },
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+        mesafe_metre = data["features"][0]["properties"]["segments"][0]["distance"]
+        return round(mesafe_metre / 1000.0, 1)
+    except Exception:
+        return None
+
 st.set_page_config(page_title="Kereste İhale & Maliyet Sistemi", layout="wide")
 
 # --- GOOGLE SHEETS BAĞLANTISI ---
@@ -87,7 +131,7 @@ with tab_islem:
 
     if islem_turu == "🔗 OGM Sonuç Linkinden Toplu Çek (Bot)":
         ihale_linki = st.text_input("OGM İhale Sonuç Linki", placeholder="Örn: https://esatis.ogm.gov.tr/ihale/207249/sonuc")
-        km_mesafe = st.number_input("Bu İhalenin Depoya Mesafesi (KM) — yer mesafe tablosunda kayıtlıysa bu alanı boş bırakabilirsin", min_value=0.0, step=1.0)
+        km_mesafe = st.number_input("Bu İhalenin Depoya Mesafesi (KM) — mesafe otomatik hesaplanamazsa bu alan kullanılır", min_value=0.0, step=1.0)
         mesafe_hatirla = st.checkbox("📌 Girdiğim bu KM değerini bu yer için hatırla (bir daha sorulmasın)", value=True)
 
         with st.expander("📍 Mesafe Tablosunu Görüntüle / Elle Ekle"):
@@ -150,12 +194,17 @@ with tab_islem:
                         if isletme_text in mesafe_sozlugu:
                             kullanilacak_km = mesafe_sozlugu[isletme_text]
                             mesafe_kaynagi = "tablo"
-                        elif km_mesafe > 0:
-                            kullanilacak_km = km_mesafe
-                            mesafe_kaynagi = "manuel"
                         else:
-                            kullanilacak_km = 0
-                            mesafe_kaynagi = "eksik"
+                            ors_sonuc = ors_km_hesapla(isletme_text)
+                            if ors_sonuc is not None:
+                                kullanilacak_km = ors_sonuc
+                                mesafe_kaynagi = "ors"
+                            elif km_mesafe > 0:
+                                kullanilacak_km = km_mesafe
+                                mesafe_kaynagi = "manuel"
+                            else:
+                                kullanilacak_km = 0
+                                mesafe_kaynagi = "eksik"
 
                         # --- CLAUDE TAKTİĞİ (DATA-MILLIS OKUMA) KESİN ÇÖZÜMÜ ---
                         genel_ihale_tarihi = "Tarih Bulunamadı"
@@ -370,12 +419,15 @@ with tab_islem:
 
                             if mesafe_kaynagi == "tablo":
                                 st.info(f"📍 '{isletme_text}' için mesafe tablodan otomatik alındı: {kullanilacak_km:g} km.")
+                            elif mesafe_kaynagi == "ors":
+                                mesafe_sheet.append_row([isletme_text, kullanilacak_km])
+                                st.info(f"🌍 '{isletme_text}' için sürüş mesafesi otomatik hesaplandı: {kullanilacak_km:g} km (OpenRouteService). Mesafe tablosuna kaydedildi, bir daha sorgulanmayacak.")
                             elif mesafe_kaynagi == "manuel":
                                 if mesafe_hatirla:
                                     mesafe_sheet.append_row([isletme_text, kullanilacak_km])
                                     st.info(f"📍 '{isletme_text}' → {kullanilacak_km:g} km olarak mesafe tablosuna kaydedildi, bir daha sorulmayacak.")
                             elif mesafe_kaynagi == "eksik":
-                                st.warning(f"⚠️ '{isletme_text}' için mesafe tablosunda kayıt yok ve KM girilmedi, mesafe 0 olarak kaydedildi. Yukarıdaki 'Mesafe Tablosunu Görüntüle / Elle Ekle' kısmından bu yer için KM ekleyebilirsin.")
+                                st.warning(f"⚠️ '{isletme_text}' için otomatik mesafe hesaplanamadı ve KM girilmedi, mesafe 0 olarak kaydedildi. Yukarıdaki 'Mesafe Tablosunu Görüntüle / Elle Ekle' kısmından bu yer için KM ekleyebilirsin.")
 
                             if supheli_partiler:
                                 st.warning("⚠️ Şu partilerde fiyat veya miktar 0 olarak kaydedildi, sayfa/PDF ayrıştırması başarısız olmuş olabilir — lütfen Google Sheets'ten elle kontrol edin:\n\n" + "\n".join(f"- {p}" for p in supheli_partiler))
