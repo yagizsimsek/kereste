@@ -136,18 +136,23 @@ with tab_islem:
         if ihale_linki:
             if st.session_state.get("_onizleme_link") != ihale_linki:
                 onizleme_yer = None
+                onizleme_hata = None
                 try:
-                    _r = requests.get(ihale_linki, headers={'User-Agent': 'Mozilla/5.0'}, verify=False, timeout=8)
+                    _r = requests.get(ihale_linki, headers={'User-Agent': 'Mozilla/5.0'}, verify=False, timeout=15)
                     _s = BeautifulSoup(_r.text, 'html.parser')
                     _m = re.search(r'([A-ZÇĞİÖŞÜ\s]+(?:OİM|OBM))', _s.text)
                     if _m:
                         onizleme_yer = isletme_kisalt(_m.group(1))
+                except requests.exceptions.Timeout:
+                    onizleme_hata = "timeout"
                 except Exception:
-                    onizleme_yer = None
+                    onizleme_hata = "diger"
                 st.session_state["_onizleme_link"] = ihale_linki
                 st.session_state["_onizleme_yer"] = onizleme_yer
+                st.session_state["_onizleme_hata"] = onizleme_hata
             else:
                 onizleme_yer = st.session_state.get("_onizleme_yer")
+                onizleme_hata = st.session_state.get("_onizleme_hata")
 
             if onizleme_yer:
                 _onizleme_mesafe_verileri = mesafe_sheet.get_all_values()
@@ -165,6 +170,8 @@ with tab_islem:
                     st.caption(f"📍 Tespit edilen yer: **{onizleme_yer}** — mesafe tablosunda kayıtlı değil, OpenRouteService ile otomatik hesaplanacak.")
                 else:
                     st.caption(f"📍 Tespit edilen yer: **{onizleme_yer}** — mesafe tablosunda kayıtlı değil. Aşağıya KM gir (bir dahakine sorulmaz).")
+            elif onizleme_hata == "timeout":
+                st.caption("⏱️ OGM sunucusu 15 saniye içinde cevap vermedi (site yavaş olabilir). Aşağıdaki 'Kazandıklarımızı Çek ve Kaydet' butonu yine de dene, o 20 saniye bekliyor.")
             else:
                 st.caption("⚠️ Linkten yer bilgisi tespit edilemedi (bağlantı hatalı olabilir ya da sayfa henüz açılmadı).")
         # -------------------------------------------------------------
@@ -221,7 +228,7 @@ with tab_islem:
                         # --------------------------------------------------------
 
                         headers = {'User-Agent': 'Mozilla/5.0'}
-                        res = requests.get(ihale_linki, headers=headers, verify=False)
+                        res = requests.get(ihale_linki, headers=headers, verify=False, timeout=20)
                         soup = BeautifulSoup(res.text, 'html.parser')
 
                         isletme_text = "Bilinmeyen İşletme"
@@ -333,7 +340,7 @@ with tab_islem:
                                         if detay_a:
                                             detay_linki = urljoin(ihale_linki, detay_a['href'])
                                             try:
-                                                d_res = requests.get(detay_linki, headers=headers, verify=False)
+                                                d_res = requests.get(detay_linki, headers=headers, verify=False, timeout=15)
                                                 d_soup = BeautifulSoup(d_res.text, 'html.parser')
 
                                                 pdf_link = None
@@ -343,7 +350,7 @@ with tab_islem:
                                                         break
 
                                                 if pdf_link:
-                                                    p_res = requests.get(pdf_link, headers=headers, verify=False)
+                                                    p_res = requests.get(pdf_link, headers=headers, verify=False, timeout=20)
                                                     pdf_isim = f"temp_bot_{parti_no}.pdf"
                                                     with open(pdf_isim, "wb") as f:
                                                         f.write(p_res.content)
@@ -473,6 +480,10 @@ with tab_islem:
                             st.warning(f"Bu sayfadaki kazandığımız {atlanan_adet} partinin tümü zaten veritabanında var, o yüzden yeniden eklenmedi (Mükerrer koruması devrede).")
                         else:
                             st.error("Sayfa tarandı ancak firmalarımızın kazandığı herhangi bir parti bulunamadı.")
+                    except requests.exceptions.Timeout:
+                        st.error("⏱️ OGM sunucusu 20 saniye içinde cevap vermedi. Bu genelde OGM'nin sitesi yavaş çalıştığında ya da Streamlit Cloud'un sunucu adresini geçici olarak yavaşlattığında olur — bir kaç dakika sonra tekrar dene. Sürekli oluyorsa bana söyle, başka bir çözüm bulalım.")
+                    except requests.exceptions.RequestException as e:
+                        st.error(f"🌐 OGM sunucusuna bağlanılamadı: {e}")
                     except Exception as e:
                         st.error(f"Bot çalışırken hata oluştu: {e}")
 
