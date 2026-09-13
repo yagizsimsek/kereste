@@ -30,6 +30,8 @@ def isletme_kisalt(text):
     parcalar = t.split()
     return parcalar[-1] if parcalar else t
 
+st.set_page_config(page_title="Kereste İhale & Maliyet Sistemi", layout="wide")
+
 # --- OPENROUTESERVICE (OTOMATİK KM HESAPLAMA) ---
 try:
     ORS_API_KEY = st.secrets["ORS_API_KEY"]
@@ -73,8 +75,6 @@ def ors_km_hesapla(hedef_yer):
         return round(mesafe_metre / 1000.0, 1)
     except Exception:
         return None
-
-st.set_page_config(page_title="Kereste İhale & Maliyet Sistemi", layout="wide")
 
 # --- GOOGLE SHEETS BAĞLANTISI ---
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
