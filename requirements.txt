@@ -3,3 +3,5 @@ pdfplumber
 pandas
 gspread
 oauth2client
+requests
+beautifulsoup4	
