@@ -53,8 +53,14 @@ try:
     try:
         kasa_sheet = client.open("Kereste_İhale_Sistemi").worksheet("Kasa_Takip")
     except:
-        kasa_sheet = client.open("Kereste_İhale_Sistemi").add_worksheet(title="Kasa_Takip", rows="100", cols="14")
-        kasa_sheet.append_row(["İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not", "Nakliye Durumu", "Nakliye Notu"])
+        kasa_sheet = client.open("Kereste_İhale_Sistemi").add_worksheet(title="Kasa_Takip", rows="100", cols="15")
+        kasa_sheet.append_row(["İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not", "Nakliye Durumu", "Nakliye Notu", "Alan Firma"])
+
+    try:
+        mesafe_sheet = client.open("Kereste_İhale_Sistemi").worksheet("Mesafe_Tablosu")
+    except:
+        mesafe_sheet = client.open("Kereste_İhale_Sistemi").add_worksheet(title="Mesafe_Tablosu", rows="100", cols="2")
+        mesafe_sheet.append_row(["Yer", "KM"])
 
     sheets_baglantisi = True
 except Exception as e:
@@ -81,7 +87,28 @@ with tab_islem:
 
     if islem_turu == "🔗 OGM Sonuç Linkinden Toplu Çek (Bot)":
         ihale_linki = st.text_input("OGM İhale Sonuç Linki", placeholder="Örn: https://esatis.ogm.gov.tr/ihale/207249/sonuc")
-        km_mesafe = st.number_input("Bu İhalenin Depoya Mesafesi (KM)", min_value=0.0, step=1.0)
+        km_mesafe = st.number_input("Bu İhalenin Depoya Mesafesi (KM) — yer mesafe tablosunda kayıtlıysa bu alanı boş bırakabilirsin", min_value=0.0, step=1.0)
+        mesafe_hatirla = st.checkbox("📌 Girdiğim bu KM değerini bu yer için hatırla (bir daha sorulmasın)", value=True)
+
+        with st.expander("📍 Mesafe Tablosunu Görüntüle / Elle Ekle"):
+            mesafe_goster = mesafe_sheet.get_all_values()
+            if len(mesafe_goster) > 1:
+                st.dataframe(pd.DataFrame(mesafe_goster[1:], columns=mesafe_goster[0]), use_container_width=True)
+            else:
+                st.caption("Henüz kayıtlı mesafe yok.")
+            col_yer, col_km, col_ekle = st.columns([2, 1, 1])
+            with col_yer:
+                yeni_yer = st.text_input("Yer", placeholder="Örn: MENGEN", key="mesafe_yeni_yer")
+            with col_km:
+                yeni_km = st.number_input("KM", min_value=0.0, step=1.0, key="mesafe_yeni_km")
+            with col_ekle:
+                st.write("")
+                st.write("")
+                if st.button("Kaydet", key="mesafe_kaydet_btn"):
+                    if yeni_yer:
+                        mesafe_sheet.append_row([isletme_kisalt(yeni_yer), yeni_km])
+                        st.success("Kaydedildi!")
+                        st.rerun()
 
         if st.button("Kazandıklarımızı Çek ve Kaydet", type="primary", use_container_width=True):
             if not ihale_linki:
@@ -99,6 +126,18 @@ with tab_islem:
                                     m_prt = str(r[3]).strip()
                                     mevcut_gecmis_set.add(f"{m_isl}_{m_prt}")
 
+                        # --- MESAFE TABLOSU (yer -> km, otomatik hatırlama) ---
+                        mesafe_verileri = mesafe_sheet.get_all_values()
+                        mesafe_sozlugu = {}
+                        if len(mesafe_verileri) > 1:
+                            for mv in mesafe_verileri[1:]:
+                                if len(mv) > 1 and str(mv[0]).strip():
+                                    try:
+                                        mesafe_sozlugu[isletme_kisalt(mv[0])] = float(str(mv[1]).replace(',', '.'))
+                                    except (ValueError, TypeError):
+                                        pass
+                        # --------------------------------------------------------
+
                         headers = {'User-Agent': 'Mozilla/5.0'}
                         res = requests.get(ihale_linki, headers=headers, verify=False)
                         soup = BeautifulSoup(res.text, 'html.parser')
@@ -107,6 +146,16 @@ with tab_islem:
                         isletme_match = re.search(r'([A-ZÇĞİÖŞÜ\s]+(?:OİM|OBM))', soup.text)
                         if isletme_match:
                             isletme_text = isletme_kisalt(isletme_match.group(1))
+
+                        if isletme_text in mesafe_sozlugu:
+                            kullanilacak_km = mesafe_sozlugu[isletme_text]
+                            mesafe_kaynagi = "tablo"
+                        elif km_mesafe > 0:
+                            kullanilacak_km = km_mesafe
+                            mesafe_kaynagi = "manuel"
+                        else:
+                            kullanilacak_km = 0
+                            mesafe_kaynagi = "eksik"
 
                         # --- CLAUDE TAKTİĞİ (DATA-MILLIS OKUMA) KESİN ÇÖZÜMÜ ---
                         genel_ihale_tarihi = "Tarih Bulunamadı"
@@ -309,7 +358,7 @@ with tab_islem:
                                             except Exception as e:
                                                 pass
 
-                                        yeni_satir = [satir_ihale_tarihi, isletme_text, alan_firma, str(parti_no), cins, str(hesaplanan_boy), float(round(miktar_float, 3)), float(round(hesaplanan_kutur, 2)), int(km_mesafe), int(fiyat_int)]
+                                        yeni_satir = [satir_ihale_tarihi, isletme_text, alan_firma, str(parti_no), cins, str(hesaplanan_boy), float(round(miktar_float, 3)), float(round(hesaplanan_kutur, 2)), int(kullanilacak_km), int(fiyat_int)]
                                         eklenecek_satirlar.append(yeni_satir)
                                         mevcut_gecmis_set.add(kayit_id_bot)
                                         if fiyat_int == 0 or miktar_float == 0.0:
@@ -318,6 +367,16 @@ with tab_islem:
                         if len(eklenecek_satirlar) > 0:
                             sheet.append_rows(eklenecek_satirlar, value_input_option='USER_ENTERED')
                             st.success(f"🎉 Helal olsun! {len(eklenecek_satirlar)} adet yeni ihale işlendi! (Zaten kayıtlı olan {atlanan_adet} parti atlandı).")
+
+                            if mesafe_kaynagi == "tablo":
+                                st.info(f"📍 '{isletme_text}' için mesafe tablodan otomatik alındı: {kullanilacak_km:g} km.")
+                            elif mesafe_kaynagi == "manuel":
+                                if mesafe_hatirla:
+                                    mesafe_sheet.append_row([isletme_text, kullanilacak_km])
+                                    st.info(f"📍 '{isletme_text}' → {kullanilacak_km:g} km olarak mesafe tablosuna kaydedildi, bir daha sorulmayacak.")
+                            elif mesafe_kaynagi == "eksik":
+                                st.warning(f"⚠️ '{isletme_text}' için mesafe tablosunda kayıt yok ve KM girilmedi, mesafe 0 olarak kaydedildi. Yukarıdaki 'Mesafe Tablosunu Görüntüle / Elle Ekle' kısmından bu yer için KM ekleyebilirsin.")
+
                             if supheli_partiler:
                                 st.warning("⚠️ Şu partilerde fiyat veya miktar 0 olarak kaydedildi, sayfa/PDF ayrıştırması başarısız olmuş olabilir — lütfen Google Sheets'ten elle kontrol edin:\n\n" + "\n".join(f"- {p}" for p in supheli_partiler))
                         elif atlanan_adet > 0:
@@ -410,14 +469,13 @@ with tab_gecmis:
 # --- KASA VE ÖDEME TAKİP SEKMESİ ---
 with tab_odeme:
     st.subheader("💳 Kasa ve Son Ödeme Tarihi Takibi")
-    st.info("OGM 'Parti Satış' ekranındaki tabloyu seçip yapıştırın. Yapışık ya da boşluklu olması fark etmez, bot içinden verileri çeker.")
 
     if sheets_baglantisi:
-        
+
         # --- TABLO SÜTUN ONARICI ---
         kasa_data = kasa_sheet.get_all_values()
         headers = kasa_data[0] if len(kasa_data) > 0 else []
-        ideal_headers = ["İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not", "Nakliye Durumu", "Nakliye Notu"]
+        ideal_headers = ["İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not", "Nakliye Durumu", "Nakliye Notu", "Alan Firma"]
 
         if kasa_sheet.col_count < len(ideal_headers):
             kasa_sheet.add_cols(len(ideal_headers) - kasa_sheet.col_count)
@@ -427,43 +485,114 @@ with tab_odeme:
             if i >= len(headers) or headers[i] != h:
                 kasa_sheet.update_cell(1, i+1, h)
                 eksik_var_mi = True
-                
+
         if eksik_var_mi:
             kasa_data = kasa_sheet.get_all_values()
             headers = kasa_data[0]
 
+        if len(kasa_data) > 1:
+            df_kasa = pd.DataFrame(kasa_data[1:], columns=headers)
+            df_kasa['SheetRow'] = df_kasa.index + 2
+            df_kasa['_DurumTemiz'] = df_kasa["Durum"].astype(str).str.strip().str.upper()
+
+            df_bekleyen = df_kasa[df_kasa['_DurumTemiz'] != "ÖDENDİ"].copy()
+
+            st.markdown("### ⏳ Son Ödeme Tarihi Yaklaşanlar (Tarih Sıralı)")
+
+            if not df_bekleyen.empty:
+                df_bekleyen['Tarih_Formatli'] = pd.to_datetime(df_bekleyen['Son Ödeme Tarihi'], format='%d.%m.%Y', errors='coerce')
+                df_bekleyen = df_bekleyen.sort_values(by='Tarih_Formatli', ascending=True).drop(columns=['Tarih_Formatli'])
+
+                gorsel_kolonlar_kasa = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum"] if c in df_bekleyen.columns]
+                st.dataframe(df_bekleyen[gorsel_kolonlar_kasa], use_container_width=True)
+
+                st.markdown("### ✅ Ödemeyi Gerçekleştir ve Listeden Sil")
+
+                col_secim, col_not, col_btn = st.columns([2, 2, 1])
+
+                with col_secim:
+                    secenekler = []
+                    for idx, row in df_bekleyen.iterrows():
+                        firma_etiket = f" [{row['Alan Firma']}]" if row.get('Alan Firma') else ""
+                        secenekler.append(f"Satır {row['SheetRow']} | {row['İşletme']}{firma_etiket} - Parti No: {row['Parti No']} - Taksitli: {row['Taksitli Tutar']} ₺ - Nakit: {row['Nakit Tutar']} ₺")
+
+                    secilen_islem = st.selectbox("Ödemesi Yapılan Partiyi Seç", secenekler)
+
+                with col_not:
+                    islem_notu = st.text_input("Satış / Ödeme Notu Ekle", placeholder="Örn: Ziraat Kartından Nakit İndirimli Çekildi")
+
+                with col_btn:
+                    st.write("")
+                    st.write("")
+                    if st.button("💳 Ödendi Olarak İşaretle", type="primary", use_container_width=True):
+                        gercek_satir_no = int(secilen_islem.split("|")[0].replace("Satır", "").strip())
+                        durum_col_num = headers.index("Durum") + 1
+                        not_col_num = headers.index("Not") + 1
+
+                        with st.spinner("Ödeme Google Sheets'e işleniyor..."):
+                            kasa_sheet.update_cell(gercek_satir_no, durum_col_num, "ÖDENDİ")
+                            kasa_sheet.update_cell(gercek_satir_no, not_col_num, islem_notu)
+
+                            st.success("✅ Ödeme başarıyla işlendi ve arşive aktarıldı!")
+                            st.rerun()
+            else:
+                st.success("🎉 Mükemmel! Şu an ödeme bekleyen hiçbir parti bulunmuyor. Kasa tertemiz!")
+
+            st.markdown("---")
+            st.markdown("### ✅ Ödemesi Gerçekleşen (Arşiv) Partiler")
+
+            df_odenen = df_kasa[df_kasa['_DurumTemiz'] == "ÖDENDİ"].copy()
+            if not df_odenen.empty:
+                arsiv_kolonlar_kasa = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not"] if c in df_odenen.columns]
+                st.dataframe(df_odenen[arsiv_kolonlar_kasa], use_container_width=True)
+            else:
+                st.caption("Henüz ödemesi yapılıp arşivlenen bir parti bulunmuyor.")
+        else:
+            st.info("Kasa şu an boş. Lütfen aşağıdaki alana OGM ödeme tablosunu yapıştırarak sistemi başlatın.")
+
+        st.markdown("---")
+        st.markdown("### 📋 OGM Verilerini Kasaya Ekle")
+        st.info("OGM 'Parti Satış' ekranındaki tabloyu seçip yapıştırın. Yapışık ya da boşluklu olması fark etmez, bot içinden verileri çeker.")
+
         pasted_data = st.text_area("OGM Parti Satış Tablosunu Buraya Yapıştırın (CTRL+V)", height=150)
-        
+
         if st.button("🔄 OGM Verilerini Kasaya Kaydet", type="primary"):
             if pasted_data:
                 with st.spinner("Terminatör bot metni parçalıyor..."):
-                    
-                    # --- GÜVENLİ BOY ÇEKME VE EŞLEŞTİRME ---
+
+                    # --- GÜVENLİ BOY VE FİRMA ÇEKME VE EŞLEŞTİRME ---
                     gecmis_raw = sheet.get_all_values()
                     parti_boy_sozlugu = {}
+                    parti_firma_sozlugu = {}
                     if len(gecmis_raw) > 1:
                         g_headers = [str(h).strip().lower() for h in gecmis_raw[0]]
-                        
+
                         # Kolay çökmemesi için esnek indeks bulucu
-                        p_idx, b_idx, i_idx = 3, 5, 1 # Varsayılan sütun sıralarımız
+                        p_idx, b_idx, i_idx, f_idx = 3, 5, 1, 2 # Varsayılan sütun sıralarımız
                         for idx, h in enumerate(g_headers):
                             if "parti" in h: p_idx = idx
                             elif "boy" in h: b_idx = idx
                             elif "işletme" in h or "birim" in h: i_idx = idx
-                            
+                            elif "firma" in h: f_idx = idx
+
                         for g_row in gecmis_raw[1:]:
                             if len(g_row) > max(p_idx, b_idx, i_idx):
                                 p_val = str(g_row[p_idx]).strip()
                                 b_val = str(g_row[b_idx]).strip()
                                 i_val_kisa = isletme_kisalt(g_row[i_idx])
+                                f_val = str(g_row[f_idx]).strip() if len(g_row) > f_idx else ""
 
                                 if p_val and b_val:
                                     parti_boy_sozlugu[f"{i_val_kisa}_{p_val}"] = b_val
                                     # Yedek olarak düz partiyi de ekle
                                     if p_val not in parti_boy_sozlugu:
                                         parti_boy_sozlugu[p_val] = b_val
+                                if p_val and f_val:
+                                    parti_firma_sozlugu[f"{i_val_kisa}_{p_val}"] = f_val
+                                    if p_val not in parti_firma_sozlugu:
+                                        parti_firma_sozlugu[p_val] = f_val
                     # ----------------------------------------
-                    
+
                     mevcut_kayitlar = set()
                     if len(kasa_data) > 1:
                         for row in kasa_data[1:]:
@@ -471,10 +600,10 @@ with tab_odeme:
                                 m_isletme = isletme_kisalt(row[0])
                                 m_parti = str(row[2]).strip()
                                 mevcut_kayitlar.add(f"{m_isletme}_{m_parti}")
-                        
+
                     yeni_kayitlar = []
                     eklenen_adet = 0
-                    
+
                     # NOT: re.DOTALL eklendi. OGM sayfasından kopyalanan tabloda hücreler arasına bazen
                     # görünmeyen bir satır sonu (newline) karakteri giriyor; "." varsayılan olarak newline'ı
                     # eşleştirmediği için tek bir gizli satır sonu bile tüm deseni kırıp hiçbir eşleşme
@@ -482,7 +611,7 @@ with tab_odeme:
                     # gösteriliyordu). re.DOTALL ile "." artık newline dahil her karakteri eşleştiriyor.
                     pattern = r'([A-ZÇĞİÖŞÜ\s]+OİM)\s*(\d{2}\.\d{2}\.\d{4}).*?(\d+)\s*No.*?Parti\s*(.*?)\s*([\d\.,]+)\s*m³.*?([\d\.,]+)\s*₺.*?([\d\.,]+)\s*₺.*?(\d{2}\.\d{2}\.\d{4})'
                     matches = re.finditer(pattern, pasted_data, re.IGNORECASE | re.DOTALL)
-                    
+
                     found_count = 0
                     islenemedi_count = 0
                     son_hata = None
@@ -502,12 +631,17 @@ with tab_odeme:
                             ihale_tarihi = match.group(2)
                             parti_no = match.group(3).strip()
                             cinsi = match.group(4).strip()
-                            
+
                             # Boy'u sözlükten çek
                             bulunan_boy = parti_boy_sozlugu.get(f"{isletme_kisa}_{parti_no}", "-")
                             if bulunan_boy == "-":
                                 bulunan_boy = parti_boy_sozlugu.get(parti_no, "-")
-                            
+
+                            # Firma'yı sözlükten çek
+                            bulunan_firma = parti_firma_sozlugu.get(f"{isletme_kisa}_{parti_no}", "-")
+                            if bulunan_firma == "-":
+                                bulunan_firma = parti_firma_sozlugu.get(parti_no, "-")
+
                             miktar_raw = match.group(5)
                             if ',' in miktar_raw and '.' in miktar_raw:
                                 miktar_raw = miktar_raw.replace('.', '').replace(',', '.')
@@ -534,7 +668,7 @@ with tab_odeme:
                             kayit_id = f"{isletme}_{parti_no}"
                             
                             if kayit_id not in mevcut_kayitlar:
-                                yeni_kayitlar.append([isletme, ihale_tarihi, parti_no, cinsi, bulunan_boy, miktar, birim_fiyat, taksitli_tutar, nakit_tutar, son_tarih, "BEKLİYOR", "", "", ""])
+                                yeni_kayitlar.append([isletme, ihale_tarihi, parti_no, cinsi, bulunan_boy, miktar, birim_fiyat, taksitli_tutar, nakit_tutar, son_tarih, "BEKLİYOR", "", "", "", bulunan_firma])
                                 mevcut_kayitlar.add(kayit_id)
                                 eklenen_adet += 1
                         except Exception as e:
@@ -554,67 +688,6 @@ with tab_odeme:
                         st.warning("⚠️ Yeni parti bulunamadı. Kopyaladığınız verideki ihaleler zaten kasada mevcut.")
             else:
                 st.warning("Lütfen boş kutuya tabloyu yapıştırın.")
-
-        st.markdown("---")
-        st.markdown("### ⏳ Son Ödeme Tarihi Yaklaşanlar (Tarih Sıralı)")
-        
-        if len(kasa_data) > 1:
-            df_kasa = pd.DataFrame(kasa_data[1:], columns=headers)
-            df_kasa['SheetRow'] = df_kasa.index + 2
-            df_kasa['_DurumTemiz'] = df_kasa["Durum"].astype(str).str.strip().str.upper()
-
-            df_bekleyen = df_kasa[df_kasa['_DurumTemiz'] != "ÖDENDİ"].copy()
-            
-            if not df_bekleyen.empty:
-                df_bekleyen['Tarih_Formatli'] = pd.to_datetime(df_bekleyen['Son Ödeme Tarihi'], format='%d.%m.%Y', errors='coerce')
-                df_bekleyen = df_bekleyen.sort_values(by='Tarih_Formatli', ascending=True).drop(columns=['Tarih_Formatli'])
-                
-                gorsel_df = df_bekleyen[["İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum"]]
-                st.dataframe(gorsel_df, use_container_width=True)
-                
-                st.markdown("### ✅ Ödemeyi Gerçekleştir ve Listeden Sil")
-                
-                col_secim, col_not, col_btn = st.columns([2, 2, 1])
-                
-                with col_secim:
-                    secenekler = []
-                    for idx, row in df_bekleyen.iterrows():
-                        secenekler.append(f"Satır {row['SheetRow']} | {row['İşletme']} - Parti No: {row['Parti No']} - Taksitli: {row['Taksitli Tutar']} ₺ - Nakit: {row['Nakit Tutar']} ₺")
-                        
-                    secilen_islem = st.selectbox("Ödemesi Yapılan Partiyi Seç", secenekler)
-                
-                with col_not:
-                    islem_notu = st.text_input("Satış / Ödeme Notu Ekle", placeholder="Örn: Ziraat Kartından Nakit İndirimli Çekildi")
-                
-                with col_btn:
-                    st.write("")
-                    st.write("")
-                    if st.button("💳 Ödendi Olarak İşaretle", type="primary", use_container_width=True):
-                        gercek_satir_no = int(secilen_islem.split("|")[0].replace("Satır", "").strip())
-                        durum_col_num = headers.index("Durum") + 1
-                        not_col_num = headers.index("Not") + 1
-                        
-                        with st.spinner("Ödeme Google Sheets'e işleniyor..."):
-                            kasa_sheet.update_cell(gercek_satir_no, durum_col_num, "ÖDENDİ")
-                            kasa_sheet.update_cell(gercek_satir_no, not_col_num, islem_notu)
-                            
-                            st.success("✅ Ödeme başarıyla işlendi ve arşive aktarıldı!")
-                            st.rerun()
-            else:
-                st.success("🎉 Mükemmel! Şu an ödeme bekleyen hiçbir parti bulunmuyor. Kasa tertemiz!")
-
-            st.markdown("---")
-            st.markdown("### ✅ Ödemesi Gerçekleşen (Arşiv) Partiler")
-            
-            df_odenen = df_kasa[df_kasa['_DurumTemiz'] == "ÖDENDİ"].copy()
-            if not df_odenen.empty:
-                gorsel_arsiv = df_odenen[["İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not"]]
-                st.dataframe(gorsel_arsiv, use_container_width=True)
-            else:
-                st.caption("Henüz ödemesi yapılıp arşivlenen bir parti bulunmuyor.")
-
-        else:
-            st.info("Kasa şu an boş. Lütfen yukarıdaki alana OGM ödeme tablosunu yapıştırarak sistemi başlatın.")
 
 
 # --- NAKLİYE TAKİP SEKMESİ ---
@@ -645,14 +718,15 @@ with tab_nakliye:
                 df_bekleyen_nakliye['Tarih_Formatli'] = pd.to_datetime(df_bekleyen_nakliye['Son Ödeme Tarihi'], format='%d.%m.%Y', errors='coerce')
                 df_bekleyen_nakliye = df_bekleyen_nakliye.sort_values(by='Tarih_Formatli', ascending=True).drop(columns=['Tarih_Formatli'])
 
-                gorsel_kolonlar = [c for c in ["İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi"] if c in df_bekleyen_nakliye.columns]
+                gorsel_kolonlar = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi"] if c in df_bekleyen_nakliye.columns]
                 st.dataframe(df_bekleyen_nakliye[gorsel_kolonlar], use_container_width=True)
 
                 st.markdown("### ✅ Nakliyesi Yapılanları İşaretle")
 
                 secenekler_nakliye = []
                 for idx, row in df_bekleyen_nakliye.iterrows():
-                    secenekler_nakliye.append(f"Satır {row['SheetRow']} | {row['İşletme']} - Parti No: {row['Parti No']} - {row.get('Cinsi', '')} - {row.get('Miktar', '')} m³")
+                    firma_etiket = f" [{row['Alan Firma']}]" if row.get('Alan Firma') else ""
+                    secenekler_nakliye.append(f"Satır {row['SheetRow']} | {row['İşletme']}{firma_etiket} - Parti No: {row['Parti No']} - {row.get('Cinsi', '')} - {row.get('Miktar', '')} m³")
 
                 secilenler_nakliye = st.multiselect("Depodan Çekilen Partileri Seç", secenekler_nakliye, key="nakliye_multiselect")
                 nakliye_notu = st.text_input("Nakliye Notu (Kim getirdi / hangi araç)", placeholder="Örn: Mehmet'in kamyonuyla çekildi", key="nakliye_notu_input")
@@ -681,7 +755,7 @@ with tab_nakliye:
             st.markdown("### 🚛 Nakliyesi Tamamlanmış (Arşiv) Partiler")
             df_nakliye_tamam = df_odemesi_biten[df_odemesi_biten['_NakliyeTemiz'] == "NAKLİYE YAPILDI"].copy()
             if not df_nakliye_tamam.empty:
-                arsiv_kolonlar = [c for c in ["İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Nakliye Notu"] if c in df_nakliye_tamam.columns]
+                arsiv_kolonlar = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Nakliye Notu"] if c in df_nakliye_tamam.columns]
                 st.dataframe(df_nakliye_tamam[arsiv_kolonlar], use_container_width=True)
             else:
                 st.caption("Henüz nakliyesi tamamlanmış bir parti bulunmuyor.")
