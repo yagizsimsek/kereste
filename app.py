@@ -131,6 +131,44 @@ with tab_islem:
 
     if islem_turu == "🔗 OGM Sonuç Linkinden Toplu Çek (Bot)":
         ihale_linki = st.text_input("OGM İhale Sonuç Linki", placeholder="Örn: https://esatis.ogm.gov.tr/ihale/207249/sonuc")
+
+        # --- LİNK YAPIŞTIRILINCA YER + KAYITLI MESAFE ÖNİZLEMESİ ---
+        if ihale_linki:
+            if st.session_state.get("_onizleme_link") != ihale_linki:
+                onizleme_yer = None
+                try:
+                    _r = requests.get(ihale_linki, headers={'User-Agent': 'Mozilla/5.0'}, verify=False, timeout=8)
+                    _s = BeautifulSoup(_r.text, 'html.parser')
+                    _m = re.search(r'([A-ZÇĞİÖŞÜ\s]+(?:OİM|OBM))', _s.text)
+                    if _m:
+                        onizleme_yer = isletme_kisalt(_m.group(1))
+                except Exception:
+                    onizleme_yer = None
+                st.session_state["_onizleme_link"] = ihale_linki
+                st.session_state["_onizleme_yer"] = onizleme_yer
+            else:
+                onizleme_yer = st.session_state.get("_onizleme_yer")
+
+            if onizleme_yer:
+                _onizleme_mesafe_verileri = mesafe_sheet.get_all_values()
+                _onizleme_mesafe_sozlugu = {}
+                if len(_onizleme_mesafe_verileri) > 1:
+                    for mv in _onizleme_mesafe_verileri[1:]:
+                        if len(mv) > 1 and str(mv[0]).strip():
+                            try:
+                                _onizleme_mesafe_sozlugu[isletme_kisalt(mv[0])] = float(str(mv[1]).replace(',', '.'))
+                            except (ValueError, TypeError):
+                                pass
+                if onizleme_yer in _onizleme_mesafe_sozlugu:
+                    st.caption(f"📍 Tespit edilen yer: **{onizleme_yer}** — mesafe tablosunda kayıtlı: **{_onizleme_mesafe_sozlugu[onizleme_yer]:g} km** (otomatik kullanılacak, bir şey girmene gerek yok).")
+                elif ORS_API_KEY:
+                    st.caption(f"📍 Tespit edilen yer: **{onizleme_yer}** — mesafe tablosunda kayıtlı değil, OpenRouteService ile otomatik hesaplanacak.")
+                else:
+                    st.caption(f"📍 Tespit edilen yer: **{onizleme_yer}** — mesafe tablosunda kayıtlı değil. Aşağıya KM gir (bir dahakine sorulmaz).")
+            else:
+                st.caption("⚠️ Linkten yer bilgisi tespit edilemedi (bağlantı hatalı olabilir ya da sayfa henüz açılmadı).")
+        # -------------------------------------------------------------
+
         km_mesafe = st.number_input("Bu İhalenin Depoya Mesafesi (KM) — mesafe otomatik hesaplanamazsa bu alan kullanılır", min_value=0.0, step=1.0)
         mesafe_hatirla = st.checkbox("📌 Girdiğim bu KM değerini bu yer için hatırla (bir daha sorulmasın)", value=True)
 
