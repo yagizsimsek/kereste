@@ -661,6 +661,19 @@ with tab_odeme:
             if pasted_data:
                 with st.spinner("Terminatör bot metni parçalıyor..."):
 
+                    # --- TEK YAPIŞTIRMA = TEK FİRMA ---
+                    # OGM'nin Parti Satış ekranı tek bir alıcı hesabına ait olduğu için,
+                    # bir yapıştırmadaki tüm partiler aynı firmaya (Keleş Ahşap ya da Necati Keleş) aittir.
+                    # Bunu ana sheet'teki eksik/gecikmeli kayıtlara bağımlı kalmadan direkt metinden tespit ediyoruz.
+                    _pasted_upper = pasted_data.upper()
+                    if "NECATİ KELEŞ" in _pasted_upper:
+                        yapistirma_firmasi = "Necati Keleş"
+                    elif "KELEŞ AHŞAP" in _pasted_upper:
+                        yapistirma_firmasi = "Keleş Ahşap"
+                    else:
+                        yapistirma_firmasi = None
+                    # ----------------------------------------
+
                     # --- GÜVENLİ BOY VE FİRMA ÇEKME VE EŞLEŞTİRME ---
                     gecmis_raw = sheet.get_all_values()
                     parti_boy_sozlugu = {}
@@ -738,10 +751,14 @@ with tab_odeme:
                             if bulunan_boy == "-":
                                 bulunan_boy = parti_boy_sozlugu.get(parti_no, "-")
 
-                            # Firma'yı sözlükten çek
-                            bulunan_firma = parti_firma_sozlugu.get(f"{isletme_kisa}_{parti_no}", "-")
-                            if bulunan_firma == "-":
-                                bulunan_firma = parti_firma_sozlugu.get(parti_no, "-")
+                            # Firma: önce yapıştırmanın genelinden tespit edilen (tek yapıştırma = tek firma),
+                            # bulunamazsa yedek olarak ana sheet'teki parti eşleşmesinden çek
+                            if yapistirma_firmasi:
+                                bulunan_firma = yapistirma_firmasi
+                            else:
+                                bulunan_firma = parti_firma_sozlugu.get(f"{isletme_kisa}_{parti_no}", "-")
+                                if bulunan_firma == "-":
+                                    bulunan_firma = parti_firma_sozlugu.get(parti_no, "-")
 
                             miktar_raw = match.group(5)
                             if ',' in miktar_raw and '.' in miktar_raw:
@@ -780,6 +797,8 @@ with tab_odeme:
                     if yeni_kayitlar:
                         kasa_sheet.append_rows(yeni_kayitlar, value_input_option='USER_ENTERED')
                         st.success(f"🎉 Harika! {eklenen_adet} adet parti (İşletme+Parti No kontrolünden geçerek) Kasaya eklendi.")
+                        if not yapistirma_firmasi:
+                            st.warning("⚠️ Yapıştırılan metinde 'KELEŞ AHŞAP' ya da 'NECATİ KELEŞ' geçmiyor, firma otomatik tespit edilemedi. Ana sheet'teki eşleşmeler kullanıldı, bazı partilerde 'Alan Firma' boş kalmış olabilir.")
                         st.rerun()
                     elif found_count == 0:
                         st.error("❌ Yapıştırılan metinde tanınabilir hiçbir parti satırı bulunamadı. OGM 'Parti Satış' ekranındaki tabloyu (başlıklar dahil) tam olarak kopyaladığınızdan emin olun.")
