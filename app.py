@@ -18,11 +18,20 @@ from collections import Counter
 # SSL Uyarılarını Kapat
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+def tr_upper(text):
+    """Python'un .upper() metodu Türkçe kurallarını bilmez: küçük 'i' harfini düz 'I' yapar,
+    oysa Türkçede karşılığı noktalı 'İ' olmalı (Örn: 'Necati'.upper() -> 'NECATI', 'NECATİ' değil).
+    Bu yüzden 'NECATİ KELEŞ' gibi aramalar sessizce kaçırılabiliyordu. Bu fonksiyon önce
+    küçük i'leri İ'ye çevirip sonra büyük harfe çeviriyor, karşılaştırmalar güvenli oluyor."""
+    if not text:
+        return ""
+    return str(text).replace('i', 'İ').upper()
+
 def isletme_kisalt(text):
     """OİM/OBM/Müdürlüğü eklerini atıp sadece yer adını döndürür (Örn: 'MENGEN OİM' -> 'MENGEN')."""
     if not text:
         return ""
-    t = str(text).strip().upper()
+    t = tr_upper(str(text).strip())
     m = re.search(r'([A-ZÇĞİÖŞÜ]+)\s+(?:OİM|OBM)\b', t)
     if m:
         return m.group(1).strip()
@@ -288,7 +297,7 @@ with tab_islem:
                         if dogru_tablo:
                             rows = dogru_tablo.find_all('tr')
                             for row in rows:
-                                row_text = row.get_text(separator=' ', strip=True).upper()
+                                row_text = tr_upper(row.get_text(separator=' ', strip=True))
                                 if "KELEŞ AHŞAP" in row_text or "NECATİ KELEŞ" in row_text:
                                     cols = row.find_all('td')
                                     if len(cols) > 5:
@@ -594,7 +603,7 @@ with tab_odeme:
         if len(kasa_data) > 1:
             df_kasa = pd.DataFrame(kasa_data[1:], columns=headers)
             df_kasa['SheetRow'] = df_kasa.index + 2
-            df_kasa['_DurumTemiz'] = df_kasa["Durum"].astype(str).str.strip().str.upper()
+            df_kasa['_DurumTemiz'] = df_kasa["Durum"].astype(str).str.strip().apply(tr_upper)
 
             df_bekleyen = df_kasa[df_kasa['_DurumTemiz'] != "ÖDENDİ"].copy()
 
@@ -665,7 +674,7 @@ with tab_odeme:
                     # OGM'nin Parti Satış ekranı tek bir alıcı hesabına ait olduğu için,
                     # bir yapıştırmadaki tüm partiler aynı firmaya (Keleş Ahşap ya da Necati Keleş) aittir.
                     # Bunu ana sheet'teki eksik/gecikmeli kayıtlara bağımlı kalmadan direkt metinden tespit ediyoruz.
-                    _pasted_upper = pasted_data.upper()
+                    _pasted_upper = tr_upper(pasted_data)
                     if "NECATİ KELEŞ" in _pasted_upper:
                         yapistirma_firmasi = "Necati Keleş"
                     elif "KELEŞ AHŞAP" in _pasted_upper:
@@ -822,10 +831,10 @@ with tab_nakliye:
         if len(nakliye_kasa_data) > 1 and "Durum" in nakliye_headers:
             df_nakliye = pd.DataFrame(nakliye_kasa_data[1:], columns=nakliye_headers)
             df_nakliye['SheetRow'] = df_nakliye.index + 2
-            df_nakliye['_DurumTemiz'] = df_nakliye["Durum"].astype(str).str.strip().str.upper()
+            df_nakliye['_DurumTemiz'] = df_nakliye["Durum"].astype(str).str.strip().apply(tr_upper)
 
             if "Nakliye Durumu" in df_nakliye.columns:
-                df_nakliye['_NakliyeTemiz'] = df_nakliye["Nakliye Durumu"].astype(str).str.strip().str.upper()
+                df_nakliye['_NakliyeTemiz'] = df_nakliye["Nakliye Durumu"].astype(str).str.strip().apply(tr_upper)
             else:
                 df_nakliye['_NakliyeTemiz'] = ""
 
@@ -969,13 +978,13 @@ with tab_radar:
                                 st.error("❌ Hiç tablo satırı bulunamadı. Tablo muhtemelen JavaScript ile sonradan yükleniyor.")
 
                             for tr in tum_satirlar:
-                                satir_metni = tr.get_text(separator=' ', strip=True).upper()
+                                satir_metni = tr_upper(tr.get_text(separator=' ', strip=True))
                                 if not satir_metni:
                                     continue
 
                                 eslesen_bolge = None
                                 for bolge in mevcut_liste:
-                                    if bolge.upper() in satir_metni:
+                                    if tr_upper(bolge) in satir_metni:
                                         eslesen_bolge = bolge
                                         break
 
