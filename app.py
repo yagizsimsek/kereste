@@ -975,11 +975,20 @@ with tab_nakliye:
                 else:
                     st.caption("⚠️ 'Fatura' sütunu henüz sayfada yok — Kasa & Ödeme sekmesini bir kez açıp tekrar dene, otomatik eklenecek.")
 
-                # --- İŞLETMELERE GÖRE AYRI SEKMELİ EXCEL İNDİRME ---
+                # --- İŞLETME + İHALE TARİHİ KOMBİNASYONUNA GÖRE AYRI SEKMELİ EXCEL İNDİRME ---
+                # Aynı yer (Örn. ALADAĞ) farklı tarihlerde birden fazla ihale olabilir; bunları
+                # tek sekmede birleştirmiyoruz, her ihale (yer + tarih) kendi sekmesinde ayrı duruyor.
                 excel_buffer = io.BytesIO()
                 with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
                     duzenlenen_arsiv.to_excel(writer, sheet_name='Tümü', index=False)
-                    if "İşletme" in duzenlenen_arsiv.columns:
+                    if "İşletme" in duzenlenen_arsiv.columns and "İhale Tarihi" in duzenlenen_arsiv.columns:
+                        for (isletme_adi, tarih), grup in duzenlenen_arsiv.groupby(['İşletme', 'İhale Tarihi']):
+                            sheet_adi = f"{isletme_adi}_{tarih}".strip() or 'Bilinmeyen'
+                            for ch in ['\\', '/', '*', '[', ']', ':', '?']:
+                                sheet_adi = sheet_adi.replace(ch, '-')
+                            sheet_adi = sheet_adi[:31]
+                            grup.to_excel(writer, sheet_name=sheet_adi, index=False)
+                    elif "İşletme" in duzenlenen_arsiv.columns:
                         for isletme_adi, grup in duzenlenen_arsiv.groupby('İşletme'):
                             sheet_adi = str(isletme_adi).strip() or 'Bilinmeyen'
                             for ch in ['\\', '/', '*', '[', ']', ':', '?']:
@@ -988,7 +997,7 @@ with tab_nakliye:
                             grup.to_excel(writer, sheet_name=sheet_adi, index=False)
 
                 st.download_button(
-                    "📥 Nakliye Arşivini Excel Olarak İndir (Her İşletme Ayrı Sekmede)",
+                    "📥 Nakliye Arşivini Excel Olarak İndir (Her İhale Ayrı Sekmede)",
                     data=excel_buffer.getvalue(),
                     file_name=f"nakliye_arsiv_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
