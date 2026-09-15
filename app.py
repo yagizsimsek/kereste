@@ -1,6 +1,7 @@
 import streamlit as st
 import pdfplumber
 import pandas as pd
+import io
 import re
 from datetime import datetime
 import gspread
@@ -106,8 +107,8 @@ try:
     try:
         kasa_sheet = client.open("Kereste_İhale_Sistemi").worksheet("Kasa_Takip")
     except:
-        kasa_sheet = client.open("Kereste_İhale_Sistemi").add_worksheet(title="Kasa_Takip", rows="100", cols="16")
-        kasa_sheet.append_row(["İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not", "Nakliye Durumu", "Nakliye Notu", "Alan Firma", "Çekilen Miktar"])
+        kasa_sheet = client.open("Kereste_İhale_Sistemi").add_worksheet(title="Kasa_Takip", rows="100", cols="17")
+        kasa_sheet.append_row(["İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not", "Nakliye Durumu", "Nakliye Notu", "Alan Firma", "Çekilen Miktar", "Fatura"])
 
     try:
         mesafe_sheet = client.open("Kereste_İhale_Sistemi").worksheet("Mesafe_Tablosu")
@@ -585,7 +586,7 @@ with tab_odeme:
         # --- TABLO SÜTUN ONARICI ---
         kasa_data = kasa_sheet.get_all_values()
         headers = kasa_data[0] if len(kasa_data) > 0 else []
-        ideal_headers = ["İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not", "Nakliye Durumu", "Nakliye Notu", "Alan Firma", "Çekilen Miktar"]
+        ideal_headers = ["İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not", "Nakliye Durumu", "Nakliye Notu", "Alan Firma", "Çekilen Miktar", "Fatura"]
 
         if kasa_sheet.col_count < len(ideal_headers):
             kasa_sheet.add_cols(len(ideal_headers) - kasa_sheet.col_count)
@@ -775,7 +776,7 @@ with tab_odeme:
                             kayit_id = f"{isletme}_{parti_no}"
                             
                             if kayit_id not in mevcut_kayitlar:
-                                yeni_kayitlar.append([isletme, ihale_tarihi, parti_no, cinsi, bulunan_boy, miktar, birim_fiyat, taksitli_tutar, nakit_tutar, son_tarih, "BEKLİYOR", "", "", "", bulunan_firma, ""])
+                                yeni_kayitlar.append([isletme, ihale_tarihi, parti_no, cinsi, bulunan_boy, miktar, birim_fiyat, taksitli_tutar, nakit_tutar, son_tarih, "BEKLİYOR", "", "", "", bulunan_firma, "", ""])
                                 mevcut_kayitlar.add(kayit_id)
                                 eklenen_adet += 1
                         except Exception as e:
@@ -939,8 +940,59 @@ with tab_nakliye:
             st.markdown("### 🚛 Nakliyesi Tamamlanmış (Arşiv) Partiler")
             df_nakliye_tamam = df_odemesi_biten[df_odemesi_biten['_NakliyeTemiz'] == "NAKLİYE YAPILDI"].copy()
             if not df_nakliye_tamam.empty:
-                arsiv_kolonlar = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Nakliye Notu"] if c in df_nakliye_tamam.columns]
-                st.dataframe(df_nakliye_tamam[arsiv_kolonlar], use_container_width=True)
+                df_nakliye_tamam = df_nakliye_tamam.reset_index(drop=True)
+                if "Fatura" in df_nakliye_tamam.columns:
+                    df_nakliye_tamam['Fatura'] = df_nakliye_tamam["Fatura"].astype(str).str.strip().apply(tr_upper) == "EVET"
+                else:
+                    df_nakliye_tamam['Fatura'] = False
+
+                arsiv_kolonlar = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Nakliye Notu", "Fatura"] if c in df_nakliye_tamam.columns]
+                gorsel_arsiv = df_nakliye_tamam[arsiv_kolonlar].copy()
+
+                duzenlenen_arsiv = st.data_editor(
+                    gorsel_arsiv,
+                    column_config={
+                        "Fatura": st.column_config.CheckboxColumn("📄 Fatura Geldi mi?", help="Muhasebeci fatura geldiğinde burayı tikleyip geçecek."),
+                    },
+                    disabled=[c for c in arsiv_kolonlar if c != "Fatura"],
+                    hide_index=True,
+                    use_container_width=True,
+                    key="fatura_editor",
+                )
+
+                if "Fatura" in nakliye_headers:
+                    fatura_col = nakliye_headers.index("Fatura") + 1
+                    degisiklik_oldu = False
+                    for i in range(len(gorsel_arsiv)):
+                        eski_deger = gorsel_arsiv.iloc[i]['Fatura']
+                        yeni_deger = duzenlenen_arsiv.iloc[i]['Fatura']
+                        if bool(eski_deger) != bool(yeni_deger):
+                            satir_no = int(df_nakliye_tamam.iloc[i]['SheetRow'])
+                            kasa_sheet.update_cell(satir_no, fatura_col, "EVET" if yeni_deger else "")
+                            degisiklik_oldu = True
+                    if degisiklik_oldu:
+                        st.rerun()
+                else:
+                    st.caption("⚠️ 'Fatura' sütunu henüz sayfada yok — Kasa & Ödeme sekmesini bir kez açıp tekrar dene, otomatik eklenecek.")
+
+                # --- İŞLETMELERE GÖRE AYRI SEKMELİ EXCEL İNDİRME ---
+                excel_buffer = io.BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                    duzenlenen_arsiv.to_excel(writer, sheet_name='Tümü', index=False)
+                    if "İşletme" in duzenlenen_arsiv.columns:
+                        for isletme_adi, grup in duzenlenen_arsiv.groupby('İşletme'):
+                            sheet_adi = str(isletme_adi).strip() or 'Bilinmeyen'
+                            for ch in ['\\', '/', '*', '[', ']', ':', '?']:
+                                sheet_adi = sheet_adi.replace(ch, '-')
+                            sheet_adi = sheet_adi[:31]
+                            grup.to_excel(writer, sheet_name=sheet_adi, index=False)
+
+                st.download_button(
+                    "📥 Nakliye Arşivini Excel Olarak İndir (Her İşletme Ayrı Sekmede)",
+                    data=excel_buffer.getvalue(),
+                    file_name=f"nakliye_arsiv_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
             else:
                 st.caption("Henüz nakliyesi tamamlanmış bir parti bulunmuyor.")
         else:
