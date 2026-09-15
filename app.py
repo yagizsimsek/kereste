@@ -43,7 +43,12 @@ def isletme_kisalt(text):
     return parcalar[-1] if parcalar else t
 
 def sayi_parse(v):
-    """'42,707' ya da '1.234,56' gibi Türkçe ondalıklı bir metni float'a çevirir, boş/bozuksa 0.0 döner."""
+    """'42,707' ya da '1.234,56' gibi Türkçe ondalıklı bir metni float'a çevirir, boş/bozuksa 0.0 döner.
+    NOT: pandas boş hücreleri None/NaN'a çevirebiliyor — 'nan' metni float('nan') ile SESSİZCE
+    geçerli bir sayıya (NaN) dönüştüğü için bunu en başta ayrıca eleyip 0.0 döndürüyoruz, yoksa
+    NaN toplamlara sessizce karışıp (Örn. 'Gerçek Maliyet' hesapları) tüm sonucu NaN yapabiliyordu."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return 0.0
     s = str(v).strip()
     if not s:
         return 0.0
@@ -818,16 +823,20 @@ with tab_odeme:
 
             # Gerçek Birim Maliyet = Birim Fiyat + Nakliye Ücreti — ihalede ucuz görünen bir
             # birim fiyat, nakliyesi pahalıysa gerçekte daha maliyetli olabiliyor (Örn. 7000 + 1000 = 8000).
-            if "Birim Fiyat" in df_bekleyen.columns:
+            # NOT: boş bir DataFrame üzerinde .apply() pandas'ta object-dtype boş bir Series
+            # döndürüp toplama/yuvarlamada TypeError'a yol açabiliyor — bu yüzden her yerde
+            # "not df_bekleyen.empty" ile koruyoruz (Kasa tamamen temizken bu sekme çöküyordu).
+            if not df_bekleyen.empty and "Birim Fiyat" in df_bekleyen.columns:
                 _birim_sayi = df_bekleyen["Birim Fiyat"].apply(sayi_parse)
                 _ucret_sayi_kasa = df_bekleyen["Nakliye Ücreti"].apply(sayi_parse) if "Nakliye Ücreti" in df_bekleyen.columns else 0.0
                 df_bekleyen["Gerçek Birim Maliyet"] = (_birim_sayi + _ucret_sayi_kasa).round(2)
 
             st.markdown("### 📊 Bekleyen Satışların Özeti")
             _odeme_tutar = 0.0
-            for _c in ["Taksitli Tutar", "Nakit Tutar"]:
-                if _c in df_bekleyen.columns:
-                    _odeme_tutar += df_bekleyen[_c].apply(sayi_parse).sum()
+            if not df_bekleyen.empty:
+                for _c in ["Taksitli Tutar", "Nakit Tutar"]:
+                    if _c in df_bekleyen.columns:
+                        _odeme_tutar += float(df_bekleyen[_c].apply(sayi_parse).sum())
 
             col_ozet1, col_ozet2 = st.columns([1, 2])
             with col_ozet1:
@@ -835,19 +844,23 @@ with tab_odeme:
                 st.metric("📦 Bekleyen Parti Sayısı", len(df_bekleyen))
             with col_ozet2:
                 if not df_bekleyen.empty and "Cinsi" in df_bekleyen.columns and "Miktar" in df_bekleyen.columns:
+                    # Türe göre değil, tür+boy kombinasyonuna göre kırıyoruz (Örn. "Çam 3" ve
+                    # "Çam 4" ayrı gösterilsin) — ama sınıf/kalite koduna kadar inmiyoruz.
+                    _boy_kolonu = df_bekleyen["Boy"].astype(str).str.strip().replace("", "?") if "Boy" in df_bekleyen.columns else "?"
                     _tur_ozet = (
                         df_bekleyen.assign(
                             _AgacTuru=df_bekleyen["Cinsi"].apply(agac_turu_cikar),
+                            _Boy=_boy_kolonu,
                             _MiktarSayi=df_bekleyen["Miktar"].apply(sayi_parse),
                         )
-                        .groupby("_AgacTuru")["_MiktarSayi"].sum()
+                        .groupby(["_AgacTuru", "_Boy"])["_MiktarSayi"].sum()
                         .sort_values(ascending=False)
                     )
                     if not _tur_ozet.empty:
-                        st.markdown("**Ağaç Türüne Göre Bekleyen Miktar**")
+                        st.markdown("**Ağaç Türü ve Boya Göre Bekleyen Miktar**")
                         _tur_cols = st.columns(min(len(_tur_ozet), 4))
-                        for i, (tur, miktar) in enumerate(_tur_ozet.items()):
-                            _tur_cols[i % len(_tur_cols)].metric(f"🌲 {tur}", m3_formatla(miktar))
+                        for i, ((tur, boy), miktar) in enumerate(_tur_ozet.items()):
+                            _tur_cols[i % len(_tur_cols)].metric(f"🌲 {tur} {boy}", m3_formatla(miktar))
                 else:
                     st.caption("Ağaç türü kırılımı için henüz veri yok.")
 
@@ -1111,9 +1124,10 @@ with tab_nakliye:
 
             st.markdown("### 📊 Nakliyesi Bekleyen Partilerin Özeti")
             _nakliye_tutar = 0.0
-            for _c in ["Taksitli Tutar", "Nakit Tutar"]:
-                if _c in df_bekleyen_nakliye.columns:
-                    _nakliye_tutar += df_bekleyen_nakliye[_c].apply(sayi_parse).sum()
+            if not df_bekleyen_nakliye.empty:
+                for _c in ["Taksitli Tutar", "Nakit Tutar"]:
+                    if _c in df_bekleyen_nakliye.columns:
+                        _nakliye_tutar += float(df_bekleyen_nakliye[_c].apply(sayi_parse).sum())
 
             col_nak1, col_nak2 = st.columns([1, 2])
             with col_nak1:
@@ -1121,16 +1135,17 @@ with tab_nakliye:
                 st.metric("📦 Bekleyen Parti Sayısı", len(df_bekleyen_nakliye))
             with col_nak2:
                 if not df_bekleyen_nakliye.empty and "Cinsi" in df_bekleyen_nakliye.columns:
+                    _boy_kolonu_nak = df_bekleyen_nakliye["Boy"].astype(str).str.strip().replace("", "?") if "Boy" in df_bekleyen_nakliye.columns else "?"
                     _tur_ozet_nak = (
-                        df_bekleyen_nakliye.assign(_AgacTuru=df_bekleyen_nakliye["Cinsi"].apply(agac_turu_cikar))
-                        .groupby("_AgacTuru")["Kalan Miktar"].sum()
+                        df_bekleyen_nakliye.assign(_AgacTuru=df_bekleyen_nakliye["Cinsi"].apply(agac_turu_cikar), _Boy=_boy_kolonu_nak)
+                        .groupby(["_AgacTuru", "_Boy"])["Kalan Miktar"].sum()
                         .sort_values(ascending=False)
                     )
                     if not _tur_ozet_nak.empty:
-                        st.markdown("**Ağaç Türüne Göre Depoda Kalan Miktar**")
+                        st.markdown("**Ağaç Türü ve Boya Göre Depoda Kalan Miktar**")
                         _tur_cols_nak = st.columns(min(len(_tur_ozet_nak), 4))
-                        for i, (tur, miktar) in enumerate(_tur_ozet_nak.items()):
-                            _tur_cols_nak[i % len(_tur_cols_nak)].metric(f"🌲 {tur}", m3_formatla(miktar))
+                        for i, ((tur, boy), miktar) in enumerate(_tur_ozet_nak.items()):
+                            _tur_cols_nak[i % len(_tur_cols_nak)].metric(f"🌲 {tur} {boy}", m3_formatla(miktar))
                 else:
                     st.caption("Ağaç türü kırılımı için henüz veri yok.")
 
@@ -1297,12 +1312,44 @@ with tab_nakliye:
                         st.rerun()
                 else:
                     st.caption("⚠️ 'Fatura' sütunu henüz sayfada yok — Kasa & Ödeme sekmesini bir kez açıp tekrar dene, otomatik eklenecek.")
+            else:
+                st.caption("Henüz nakliyesi tamamlanmış bir parti bulunmuyor.")
+
+            # --- İHALE BAZLI TAM TABLO (Excel + Drive) ---
+            # Yukarıdaki arşiv tablosu SADECE tamamen çekilmiş partileri gösteriyor. Ama
+            # muhasebeciye/işletmeye "bu ihalede 4 parti aldık, 2'si çekildi" gibi TÜM
+            # tabloyu göstermek için ödemesi yapılmış HER partiyi (çekilsin ya da çekilmesin)
+            # durum etiketiyle birlikte ayrı bir tabloda tutuyoruz.
+            if not df_odemesi_biten.empty:
+                df_ihale_ozet = df_odemesi_biten.copy().reset_index(drop=True)
+
+                def _nakliye_durumu_ozetle(v):
+                    v = tr_upper(str(v).strip())
+                    if v == "NAKLİYE YAPILDI":
+                        return "✅ Tamamlandı"
+                    elif v == "KISMİ ÇEKİLDİ":
+                        return "🟡 Kısmi Çekildi"
+                    else:
+                        return "🔴 Eksik (Çekilmedi)"
+
+                df_ihale_ozet["Nakliye Durumu Özeti"] = df_ihale_ozet["_NakliyeTemiz"].apply(_nakliye_durumu_ozetle)
+                if "Fatura" in df_ihale_ozet.columns:
+                    df_ihale_ozet["Fatura"] = df_ihale_ozet["Fatura"].astype(str).str.strip().apply(tr_upper) == "EVET"
+                else:
+                    df_ihale_ozet["Fatura"] = False
+
+                ihale_ozet_kolonlar = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Kalan Miktar", "Nakliye Durumu Özeti", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Nakliye Ücreti", "Nakliyeci", "Nakliye Notu", "Fatura"] if c in df_ihale_ozet.columns]
+                df_ihale_ozet = df_ihale_ozet[ihale_ozet_kolonlar]
 
                 st.markdown("---")
+                st.markdown("### 📋 İhale Bazlı Tam Tablo (Çekilen + Eksik Tüm Partiler)")
+                st.caption("Bir ihalede aldığımız partilerin hepsi burada — çekilmemiş olanlar da 'Eksik' etiketiyle görünür, sadece tamamlananları değil.")
+                st.dataframe(df_ihale_ozet, use_container_width=True)
+
                 st.markdown("#### ☁️ Ana Drive Dosyasına Otomatik Aktarım")
                 st.caption("Bu tablo, 'Kereste_İhale_Sistemi' dosyasında 'Nakliye_Tümü' sekmesine ve her ihale (İşletme + İhale Tarihi) için kendi ayrı sekmesine otomatik olarak işleniyor — indirmene gerek yok, Drive'da hep güncel duruyor.")
                 with st.spinner("Drive'daki sekmeler kontrol ediliyor..."):
-                    _senkron_oldu = nakliye_drive_senkronize(spreadsheet, gorsel_arsiv)
+                    _senkron_oldu = nakliye_drive_senkronize(spreadsheet, df_ihale_ozet)
                 if _senkron_oldu:
                     st.success("✅ Drive'daki 'Nakliye_Tümü' ve ihale bazlı sekmeler güncellendi.")
                 else:
@@ -1313,16 +1360,16 @@ with tab_nakliye:
                 # tek sekmede birleştirmiyoruz, her ihale (yer + tarih) kendi sekmesinde ayrı duruyor.
                 excel_buffer = io.BytesIO()
                 with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                    duzenlenen_arsiv.to_excel(writer, sheet_name='Tümü', index=False)
-                    if "İşletme" in duzenlenen_arsiv.columns and "İhale Tarihi" in duzenlenen_arsiv.columns:
-                        for (isletme_adi, tarih), grup in duzenlenen_arsiv.groupby(['İşletme', 'İhale Tarihi']):
+                    df_ihale_ozet.to_excel(writer, sheet_name='Tümü', index=False)
+                    if "İşletme" in df_ihale_ozet.columns and "İhale Tarihi" in df_ihale_ozet.columns:
+                        for (isletme_adi, tarih), grup in df_ihale_ozet.groupby(['İşletme', 'İhale Tarihi']):
                             sheet_adi = f"{isletme_adi}_{tarih}".strip() or 'Bilinmeyen'
                             for ch in ['\\', '/', '*', '[', ']', ':', '?']:
                                 sheet_adi = sheet_adi.replace(ch, '-')
                             sheet_adi = sheet_adi[:31]
                             grup.to_excel(writer, sheet_name=sheet_adi, index=False)
-                    elif "İşletme" in duzenlenen_arsiv.columns:
-                        for isletme_adi, grup in duzenlenen_arsiv.groupby('İşletme'):
+                    elif "İşletme" in df_ihale_ozet.columns:
+                        for isletme_adi, grup in df_ihale_ozet.groupby('İşletme'):
                             sheet_adi = str(isletme_adi).strip() or 'Bilinmeyen'
                             for ch in ['\\', '/', '*', '[', ']', ':', '?']:
                                 sheet_adi = sheet_adi.replace(ch, '-')
@@ -1335,8 +1382,6 @@ with tab_nakliye:
                     file_name=f"nakliye_arsiv_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
-            else:
-                st.caption("Henüz nakliyesi tamamlanmış bir parti bulunmuyor.")
         else:
             st.info("Kasa henüz boş ya da veri okunamadı. Önce '💳 Kasa & Ödeme Takibi' sekmesinden veri ekle.")
 
