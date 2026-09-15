@@ -2,3 +2,7 @@ credentials.json
 .streamlit/secrets.toml
 *.pdf
 __pycache__/
+calistir.sh
+calistir.sh*
+radar.log
+*.log

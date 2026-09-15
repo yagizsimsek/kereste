@@ -16,6 +16,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from collections import Counter
 import hashlib
+import uuid
 
 # SSL Uyarılarını Kapat
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -305,8 +306,13 @@ with tab_islem:
                             for r in mevcut_gecmis[1:]:
                                 if len(r) > 3:
                                     m_isl = isletme_kisalt(r[1])
+                                    m_tarih = str(r[0]).strip()
                                     m_prt = str(r[3]).strip()
-                                    mevcut_gecmis_set.add(f"{m_isl}_{m_prt}")
+                                    # Tarih dahil: aynı işletmede farklı tarihli iki ayrı ihalede
+                                    # Parti No tekrar edebilir (Örn. iki farklı ihalede de "Parti 1"
+                                    # olabilir) — tarih olmadan bu ikinci gerçek alım sessizce
+                                    # "zaten kayıtlı" sayılıp atlanırdı.
+                                    mevcut_gecmis_set.add(f"{m_isl}_{m_tarih}_{m_prt}")
 
                         # --- MESAFE TABLOSU (yer -> km, otomatik hatırlama) ---
                         mesafe_verileri = mesafe_sheet.get_all_values()
@@ -386,8 +392,8 @@ with tab_islem:
                                     cols = row.find_all('td')
                                     if len(cols) > 5:
                                         parti_no = cols[0].get_text(strip=True)
-                                        
-                                        kayit_id_bot = f"{isletme_text}_{str(parti_no).strip()}"
+
+                                        kayit_id_bot = f"{isletme_text}_{genel_ihale_tarihi}_{str(parti_no).strip()}"
                                         if kayit_id_bot in mevcut_gecmis_set:
                                             atlanan_adet += 1
                                             continue
@@ -432,6 +438,7 @@ with tab_islem:
                                         detay_a = row.find('a', href=True)
                                         if detay_a:
                                             detay_linki = urljoin(ihale_linki, detay_a['href'])
+                                            pdf_isim = None
                                             try:
                                                 d_res = requests.get(detay_linki, headers=headers, verify=False, timeout=15)
                                                 d_soup = BeautifulSoup(d_res.text, 'html.parser')
@@ -444,7 +451,10 @@ with tab_islem:
 
                                                 if pdf_link:
                                                     p_res = requests.get(pdf_link, headers=headers, verify=False, timeout=20)
-                                                    pdf_isim = f"temp_bot_{parti_no}.pdf"
+                                                    # Benzersiz dosya adı: aynı anda iki kullanıcı/sekme bot
+                                                    # çalıştırırsa aynı parti_no ile çakışıp birbirinin PDF'ini
+                                                    # bozmasın diye (parti_no tek başına eşsiz olmayabiliyor).
+                                                    pdf_isim = f"temp_bot_{uuid.uuid4().hex}.pdf"
                                                     with open(pdf_isim, "wb") as f:
                                                         f.write(p_res.content)
 
@@ -545,11 +555,13 @@ with tab_islem:
                                                                 except:
                                                                     pass
 
-                                                    if os.path.exists(pdf_isim):
-                                                        os.remove(pdf_isim)
-
                                             except Exception as e:
                                                 pass
+                                            finally:
+                                                # PDF işlenirken ortada bir hata çıksa bile (bozuk PDF,
+                                                # ayrıştırma hatası vb.) geçici dosya diskte unutulmasın.
+                                                if pdf_isim and os.path.exists(pdf_isim):
+                                                    os.remove(pdf_isim)
 
                                         yeni_satir = [satir_ihale_tarihi, isletme_text, alan_firma, str(parti_no), cins, str(hesaplanan_boy), float(round(miktar_float, 3)), float(round(hesaplanan_kutur, 2)), int(kullanilacak_km), int(fiyat_int)]
                                         eklenecek_satirlar.append(yeni_satir)
@@ -759,8 +771,12 @@ with tab_odeme:
                         not_col_num = headers.index("Not") + 1
 
                         with st.spinner("Ödeme Google Sheets'e işleniyor..."):
-                            kasa_sheet.update_cell(gercek_satir_no, durum_col_num, "ÖDENDİ")
-                            kasa_sheet.update_cell(gercek_satir_no, not_col_num, islem_notu)
+                            # Tek seferde toplu yazma: iki ayrı update_cell çağrısı arasında bağlantı
+                            # koparsa satır "Durum" güncellenip "Not" güncellenmemiş yarım kalabilirdi.
+                            kasa_sheet.update_cells([
+                                gspread.Cell(gercek_satir_no, durum_col_num, "ÖDENDİ"),
+                                gspread.Cell(gercek_satir_no, not_col_num, islem_notu),
+                            ], value_input_option='USER_ENTERED')
 
                             st.success("✅ Ödeme başarıyla işlendi ve arşive aktarıldı!")
                             st.rerun()
@@ -816,9 +832,6 @@ with tab_odeme:
 
                                 if p_val and b_val:
                                     parti_boy_sozlugu[f"{i_val_kisa}_{p_val}"] = b_val
-                                    # Yedek olarak düz partiyi de ekle
-                                    if p_val not in parti_boy_sozlugu:
-                                        parti_boy_sozlugu[p_val] = b_val
                     # ----------------------------------------
 
                     mevcut_kayitlar = set()
@@ -826,8 +839,12 @@ with tab_odeme:
                         for row in kasa_data[1:]:
                             if len(row) > 2:
                                 m_isletme = isletme_kisalt(row[0])
+                                m_tarih = str(row[1]).strip() if len(row) > 1 else ""
                                 m_parti = str(row[2]).strip()
-                                mevcut_kayitlar.add(f"{m_isletme}_{m_parti}")
+                                # Tarih dahil: aynı işletmenin farklı tarihli iki ihalesinde
+                                # Parti No tekrarlanabilir, tarihsiz kontrol gerçek bir yeni
+                                # alımı "zaten kayıtlı" sanıp sessizce atlayabilirdi.
+                                mevcut_kayitlar.add(f"{m_isletme}_{m_tarih}_{m_parti}")
 
                     yeni_kayitlar = []
                     eklenen_adet = 0
@@ -837,7 +854,7 @@ with tab_odeme:
                     # eşleştirmediği için tek bir gizli satır sonu bile tüm deseni kırıp hiçbir eşleşme
                     # bulunamamasına sebep oluyordu (ve bu durum yanlışlıkla "zaten kasada mevcut" diye
                     # gösteriliyordu). re.DOTALL ile "." artık newline dahil her karakteri eşleştiriyor.
-                    pattern = r'([A-ZÇĞİÖŞÜ\s]+OİM)\s*(\d{2}\.\d{2}\.\d{4}).*?(\d+)\s*No.*?Parti\s*(.*?)\s*([\d\.,]+)\s*m³.*?([\d\.,]+)\s*₺.*?([\d\.,]+)\s*₺.*?(\d{2}\.\d{2}\.\d{4})'
+                    pattern = r'([A-ZÇĞİÖŞÜ\s]+(?:OİM|OBM))\s*(\d{2}\.\d{2}\.\d{4}).*?(\d+)\s*No.*?Parti\s*(.*?)\s*([\d\.,]+)\s*m³.*?([\d\.,]+)\s*₺.*?([\d\.,]+)\s*₺.*?(\d{2}\.\d{2}\.\d{4})'
                     matches = re.finditer(pattern, pasted_data, re.IGNORECASE | re.DOTALL)
 
                     found_count = 0
@@ -847,7 +864,7 @@ with tab_odeme:
                         found_count += 1
                         try:
                             isletme_ham = match.group(1).strip()
-                            if "OİM" in isletme_ham:
+                            if "OİM" in tr_upper(isletme_ham) or "OBM" in tr_upper(isletme_ham):
                                 parcalar = isletme_ham.split()
                                 isletme_ham = " ".join([w for w in parcalar if w not in ["Son", "Satış", "Tarihi:"]][-2:])
                             isletme_ham = re.sub(r'^(son\s*satış\s*tarihi|seçiniz|evet|hayır|müşteri)\s*', '', isletme_ham, flags=re.IGNORECASE).strip()
@@ -860,10 +877,12 @@ with tab_odeme:
                             parti_no = match.group(3).strip()
                             cinsi = match.group(4).strip()
 
-                            # Boy'u sözlükten çek
+                            # Boy'u sözlükten çek — SADECE İşletme+Parti eşleşmesiyle. Sadece Parti
+                            # No'ya bakan bir yedek arama riskliydi: iki farklı işletmede aynı parti
+                            # numarası oluşabilir ve o zaman başka bir işletmenin boy değeri buraya
+                            # yanlışlıkla yazılırdı (görünüşte doğru ama gerçekte yanlış bir sayı).
+                            # Eşleşme yoksa "-" (açıkça eksik) bırakmak, sessizce yanlış veriden iyidir.
                             bulunan_boy = parti_boy_sozlugu.get(f"{isletme_kisa}_{parti_no}", "-")
-                            if bulunan_boy == "-":
-                                bulunan_boy = parti_boy_sozlugu.get(parti_no, "-")
 
                             # Firma: yukarıda elle seçilen (tek yapıştırma = tek firma)
                             bulunan_firma = yapistirma_firmasi
@@ -891,7 +910,7 @@ with tab_odeme:
                             
                             son_tarih = match.group(8)
                             
-                            kayit_id = f"{isletme}_{parti_no}"
+                            kayit_id = f"{isletme}_{ihale_tarihi}_{parti_no}"
                             
                             if kayit_id not in mevcut_kayitlar:
                                 yeni_kayitlar.append([isletme, ihale_tarihi, parti_no, cinsi, bulunan_boy, miktar, birim_fiyat, taksitli_tutar, nakit_tutar, son_tarih, "BEKLİYOR", "", "", "", bulunan_firma, "", ""])
@@ -1030,6 +1049,7 @@ with tab_nakliye:
                                 cekilen_col = nakliye_headers.index("Çekilen Miktar") + 1
                                 bugun_str = datetime.now().strftime("%d.%m.%Y")
                                 ozet = []
+                                yazilacak_hucreler = []
 
                                 for secim in secilenler_nakliye:
                                     satir_no = int(secim.split("|")[0].replace("Satır", "").strip())
@@ -1047,12 +1067,18 @@ with tab_nakliye:
                                     yeni_not_parcasi = f"{bugun_str}: {girilen:g} m³ çekildi" + (f" ({nakliye_notu})" if nakliye_notu else "")
                                     guncel_not = f"{eski_not} | {yeni_not_parcasi}" if eski_not else yeni_not_parcasi
 
-                                    kasa_sheet.update_cell(satir_no, nakliye_durum_col, yeni_durum)
-                                    kasa_sheet.update_cell(satir_no, nakliye_not_col, guncel_not)
-                                    kasa_sheet.update_cell(satir_no, cekilen_col, yeni_cekilen)
+                                    yazilacak_hucreler.append(gspread.Cell(satir_no, nakliye_durum_col, yeni_durum))
+                                    yazilacak_hucreler.append(gspread.Cell(satir_no, nakliye_not_col, guncel_not))
+                                    yazilacak_hucreler.append(gspread.Cell(satir_no, cekilen_col, yeni_cekilen))
 
                                     durum_metni = "tamamen çekildi" if yeni_durum == "NAKLİYE YAPILDI" else f"{yeni_kalan:g} m³ kaldı"
                                     ozet.append(f"{satir_bilgi['İşletme']} Parti {satir_bilgi['Parti No']}: {durum_metni}")
+
+                                # Tüm partiler için tüm hücreler TEK API çağrısıyla yazılıyor — birden
+                                # fazla parti seçiliyken yarıda bağlantı kopması bazı partileri
+                                # güncellenmiş bazılarını güncellenmemiş bırakmasın diye.
+                                if yazilacak_hucreler:
+                                    kasa_sheet.update_cells(yazilacak_hucreler, value_input_option='USER_ENTERED')
 
                                 st.success("✅ Kaydedildi:\n\n" + "\n".join(f"- {o}" for o in ozet))
                                 st.rerun()

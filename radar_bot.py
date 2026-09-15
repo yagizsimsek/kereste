@@ -17,7 +17,6 @@ urllib3.disable_warnings()
 GMAIL_USER = os.environ.get("GMAIL_USER")
 GMAIL_PASSWORD = os.environ.get("GMAIL_PASSWORD")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL")
-GCP_CREDS_JSON = os.environ.get("GCP_CREDENTIALS")
 
 def log(msg):
     print(msg, flush=True)
@@ -28,8 +27,13 @@ def main():
     
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
-        creds_dict = json.loads(GCP_CREDS_JSON)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        # GCP KİMLİK BİLGİLERİNİ DİREKT DOSYADAN OKU! (Mac için en sağlıklısı)
+        if os.path.exists("credentials.json"):
+            creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+        else:
+            creds_dict = json.loads(os.environ.get("GCP_CREDENTIALS"))
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            
         client = gspread.authorize(creds)
         takip_sheet = client.open("Kereste_İhale_Sistemi").worksheet("Takip_Listesi")
         mevcut_liste = [x.strip().upper() for x in takip_sheet.col_values(1)[1:] if x.strip()]
@@ -48,71 +52,118 @@ def main():
         'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8'
     }
 
-    url = "https://esatis.ogm.gov.tr/ihaleler/odun?sayfa=1"
-    log(f"🌐 İstek atılıyor: {url}")
-    
+    # Tek sayfa yeterli değil: OGM listesi birden fazla sayfaya bölünebiliyor,
+    # takip edilen bölge 2. veya 3. sayfada olursa eskiden hiç yakalanmıyordu.
+    # Boş bir sayfaya (satır yok) düşünce döngü kendiliğinden duruyor.
+    MAX_SAYFA = 5
     bulunan_ihaleler = []
-    try:
-        res = requests.get(url, headers=headers, verify=False, timeout=30)
-        log(f"📥 Yanıt Kodu: {res.status_code}, Boyut: {len(res.text)} karakter")
-        
-        soup = BeautifulSoup(res.text, 'html.parser')
-        tum_satirlar = soup.find_all('tr')
-        log(f"📄 Bulunan satır sayısı: {len(tum_satirlar)}")
-        
-        tr_tz = timezone(timedelta(hours=3))
+    tarama_basarili = False
+    son_hata = None
+    onceki_sayfa_imzasi = None
+    tr_tz = timezone(timedelta(hours=3))
 
-        for tr in tum_satirlar:
-            satir_metni = tr.get_text(separator=' ', strip=True).upper()
-            if not satir_metni:
-                continue
+    for sayfa in range(1, MAX_SAYFA + 1):
+        url = f"https://esatis.ogm.gov.tr/ihaleler/odun?sayfa={sayfa}"
+        log(f"🌐 İstek atılıyor: {url}")
+        try:
+            res = requests.get(url, headers=headers, verify=False, timeout=30)
+            log(f"📥 Sayfa {sayfa} - Yanıt Kodu: {res.status_code}, Boyut: {len(res.text)} karakter")
 
-            eslesen_bolge = None
-            for bolge in mevcut_liste:
-                if bolge in satir_metni:
-                    eslesen_bolge = bolge
-                    break
+            if res.status_code != 200:
+                son_hata = f"HTTP {res.status_code}"
+                break
 
-            if eslesen_bolge:
-                def millis_to_saat(td_class):
-                    td = tr.find('td', class_=td_class)
-                    if td and td.get('data-millis'):
-                        try:
-                            dt = datetime.fromtimestamp(int(td.get('data-millis')) / 1000, tz=tr_tz)
-                            return dt.strftime("%H:%M")
-                        except Exception:
-                            pass
-                    return "Belirtilmedi"
+            soup = BeautifulSoup(res.text, 'html.parser')
+            tum_satirlar = soup.find_all('tr')
+            log(f"📄 Sayfa {sayfa} - bulunan satır sayısı: {len(tum_satirlar)}")
+            tarama_basarili = True
 
-                baslama = millis_to_saat('baslama')
-                bitis = millis_to_saat('bitis')
+            if len(tum_satirlar) == 0:
+                break  # Daha fazla sayfa yok, döngüyü bitir.
 
-                # Eğer millis yoksa düz metinden saat yakalamayı dene
-                if baslama == "Belirtilmedi":
-                    saat_match = re.search(r'(\d{2}:\d{2})', satir_metni)
-                    if saat_match:
-                        baslama = saat_match.group(1)
+            # OGM bazı durumlarda 'sayfa' parametresini yok sayıp her sayfada aynı
+            # listeyi döndürebiliyor — bu durumda gereksiz yere aynı satırları
+            # tekrar tekrar işlemek yerine döngüyü burada durduruyoruz.
+            sayfa_imzasi = tuple(tr.get_text(separator=' ', strip=True) for tr in tum_satirlar)
+            if sayfa_imzasi == onceki_sayfa_imzasi:
+                log(f"🔁 Sayfa {sayfa} bir öncekiyle aynı içerikte, gerçek sayfalama yok gibi görünüyor — duruluyor.")
+                break
+            onceki_sayfa_imzasi = sayfa_imzasi
 
-                ilan_linki = res.url
-                a_tag = tr.find('a', href=True)
-                if a_tag:
-                    ilan_linki = urljoin(res.url, a_tag['href'])
+            for tr in tum_satirlar:
+                satir_metni = tr.get_text(separator=' ', strip=True).upper()
+                if not satir_metni:
+                    continue
 
-                kayit = {
-                    "Bölge": eslesen_bolge,
-                    "Başlama": baslama,
-                    "Bitiş": bitis,
-                    "Link": ilan_linki
-                }
+                eslesen_bolge = None
+                for bolge in mevcut_liste:
+                    if bolge in satir_metni:
+                        eslesen_bolge = bolge
+                        break
 
-                if not any(x['Bölge'] == kayit['Bölge'] and x['Başlama'] == kayit['Başlama'] for x in bulunan_ihaleler):
-                    bulunan_ihaleler.append(kayit)
-                    log(f"✅ Yakalandı: {eslesen_bolge} (Saat: {baslama})")
+                if eslesen_bolge:
+                    def millis_to_saat(td_class):
+                        td = tr.find('td', class_=td_class)
+                        if td and td.get('data-millis'):
+                            try:
+                                dt = datetime.fromtimestamp(int(td.get('data-millis')) / 1000, tz=tr_tz)
+                                return dt.strftime("%H:%M")
+                            except Exception:
+                                pass
+                        return "Belirtilmedi"
 
-    except Exception as e:
-        log(f"❌ OGM taranırken hata: {e}")
+                    baslama = millis_to_saat('baslama')
+                    bitis = millis_to_saat('bitis')
 
-    if bulunan_ihaleler:
+                    if baslama == "Belirtilmedi":
+                        saat_match = re.search(r'(\d{2}:\d{2})', satir_metni)
+                        if saat_match:
+                            baslama = saat_match.group(1)
+
+                    ilan_linki = res.url
+                    a_tag = tr.find('a', href=True)
+                    if a_tag:
+                        ilan_linki = urljoin(res.url, a_tag['href'])
+
+                    kayit = {
+                        "Bölge": eslesen_bolge,
+                        "Başlama": baslama,
+                        "Bitiş": bitis,
+                        "Link": ilan_linki
+                    }
+
+                    if not any(x['Bölge'] == kayit['Bölge'] and x['Başlama'] == kayit['Başlama'] for x in bulunan_ihaleler):
+                        bulunan_ihaleler.append(kayit)
+                        log(f"✅ Yakalandı: {eslesen_bolge} (Saat: {baslama})")
+
+        except Exception as e:
+            son_hata = f"{type(e).__name__}: {e}"
+            log(f"❌ Sayfa {sayfa} taranırken hata: {e}")
+            break
+
+    if not tarama_basarili:
+        log(f"⚠️ Tarama hiç başarılı olamadı ({son_hata}) — kontrol maili gönderiliyor.")
+        try:
+            uyari_msg = MIMEMultipart()
+            uyari_msg['From'] = GMAIL_USER
+            uyari_msg['To'] = RECEIVER_EMAIL
+            uyari_msg['Subject'] = f"⚠️ {bugun} OGM Radarı Çalışamadı"
+            uyari_msg.attach(MIMEText(
+                f"<html><body style='font-family: Arial, sans-serif;'>"
+                f"<p>Bugünkü OGM taraması teknik bir sorun nedeniyle hiç tamamlanamadı, "
+                f"bu <b>'ihale yok'</b> anlamına gelmiyor olabilir — lütfen siteyi elle kontrol et.</p>"
+                f"<p>Hata: <code>{son_hata}</code></p></body></html>",
+                'html'
+            ))
+            server = smtplib.SMTP('smtp.gmail.com', 587)
+            server.starttls()
+            server.login(GMAIL_USER, GMAIL_PASSWORD)
+            server.send_message(uyari_msg)
+            server.quit()
+            log("✅ Kontrol maili gönderildi.")
+        except Exception as e:
+            log(f"❌ Kontrol maili de gönderilemedi: {e}")
+    elif bulunan_ihaleler:
         log(f"🎯 {len(bulunan_ihaleler)} adet ihale bulundu, mail hazırlanıyor...")
         mail_icerik = f"""
         <html>
