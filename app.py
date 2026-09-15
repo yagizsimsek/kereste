@@ -861,84 +861,63 @@ with tab_nakliye:
                     firma_etiket = f" [{row['Alan Firma']}]" if row.get('Alan Firma') else ""
                     secenekler_nakliye.append(f"Satır {row['SheetRow']} | {row['İşletme']}{firma_etiket} - Parti No: {row['Parti No']} - {row.get('Cinsi', '')} - Kalan: {row['Kalan Miktar']:g} m³ / Toplam: {row['_ToplamM3']:g} m³")
 
-                st.markdown("### ✅ Tamamı Çekilenleri Toplu İşaretle")
-                st.caption("Seçtiğin partilerin kalanının TAMAMI bu seferde çekildiyse burayı kullan.")
+                st.markdown("### 🚚 Bu Seferki Çekimi Kaydet")
+                st.caption("Bu seferki taşımada hangi partilerden çekildiğini seç (birden fazla olabilir). Bir parti tamamen, diğeri yarım kalmış olabilir — seçtiğin her parti için ayrı ayrı miktar gireceksin, varsayılan olarak kalanın tamamı gelir.")
 
-                secilenler_nakliye = st.multiselect("Depodan Tamamen Çekilen Partileri Seç", secenekler_nakliye, key="nakliye_multiselect")
-                nakliye_notu = st.text_input("Nakliye Notu (Kim getirdi / hangi araç)", placeholder="Örn: Mehmet'in kamyonuyla çekildi", key="nakliye_notu_input")
+                secilenler_nakliye = st.multiselect("Bu Seferki Taşımada Hangi Partilerden Çekildi?", secenekler_nakliye, key="nakliye_multiselect")
 
-                if st.button("🚚 Seçilenleri TAMAMEN Çekildi Olarak İşaretle", type="primary", use_container_width=True):
-                    if not secilenler_nakliye:
-                        st.warning("Lütfen en az bir parti seç.")
-                    elif "Nakliye Durumu" not in nakliye_headers or "Nakliye Notu" not in nakliye_headers:
-                        st.error("Kasa_Takip sayfasında 'Nakliye Durumu' / 'Nakliye Notu' sütunları bulunamadı. Kasa & Ödeme sekmesini bir kez açıp tekrar dene.")
-                    else:
-                        with st.spinner("Nakliye durumu Google Sheets'e işleniyor..."):
-                            nakliye_durum_col = nakliye_headers.index("Nakliye Durumu") + 1
-                            nakliye_not_col = nakliye_headers.index("Nakliye Notu") + 1
-                            cekilen_col = nakliye_headers.index("Çekilen Miktar") + 1 if "Çekilen Miktar" in nakliye_headers else None
+                if secilenler_nakliye:
+                    girilen_miktarlar = {}
+                    for secim in secilenler_nakliye:
+                        satir_no = int(secim.split("|")[0].replace("Satır", "").strip())
+                        satir_bilgi = df_bekleyen_nakliye[df_bekleyen_nakliye['SheetRow'] == satir_no].iloc[0]
+                        kalan = float(satir_bilgi['Kalan Miktar'])
+                        girilen_miktarlar[satir_no] = st.number_input(
+                            f"{satir_bilgi['İşletme']} - Parti {satir_bilgi['Parti No']} — bu seferki çekilen (m³, kalan: {kalan:g})",
+                            min_value=0.0, max_value=max(kalan, 0.01), value=kalan, step=1.0,
+                            key=f"nakliye_miktar_{satir_no}",
+                        )
 
-                            for secim in secilenler_nakliye:
-                                satir_no = int(secim.split("|")[0].replace("Satır", "").strip())
-                                satir_bilgi = df_bekleyen_nakliye[df_bekleyen_nakliye['SheetRow'] == satir_no].iloc[0]
-                                kasa_sheet.update_cell(satir_no, nakliye_durum_col, "NAKLİYE YAPILDI")
-                                kasa_sheet.update_cell(satir_no, nakliye_not_col, nakliye_notu)
-                                if cekilen_col:
-                                    kasa_sheet.update_cell(satir_no, cekilen_col, float(satir_bilgi['_ToplamM3']))
+                    nakliye_notu = st.text_input("Nakliye Notu (Kim getirdi / hangi araç)", placeholder="Örn: Mehmet'in kamyonuyla çekildi", key="nakliye_notu_input")
 
-                            st.success(f"✅ {len(secilenler_nakliye)} parti tamamen çekildi olarak işaretlendi!")
-                            st.rerun()
+                    if st.button("🚚 Bu Seferki Çekimi Kaydet", type="primary", use_container_width=True):
+                        if "Nakliye Durumu" not in nakliye_headers or "Nakliye Notu" not in nakliye_headers or "Çekilen Miktar" not in nakliye_headers:
+                            st.error("Kasa_Takip sayfasında gerekli sütunlar bulunamadı. Kasa & Ödeme sekmesini bir kez açıp tekrar dene.")
+                        elif all(m <= 0 for m in girilen_miktarlar.values()):
+                            st.warning("En az bir parti için 0'dan büyük miktar gir.")
+                        else:
+                            with st.spinner("Nakliye bilgisi Google Sheets'e işleniyor..."):
+                                nakliye_durum_col = nakliye_headers.index("Nakliye Durumu") + 1
+                                nakliye_not_col = nakliye_headers.index("Nakliye Notu") + 1
+                                cekilen_col = nakliye_headers.index("Çekilen Miktar") + 1
+                                bugun_str = datetime.now().strftime("%d.%m.%Y")
+                                ozet = []
 
-                st.markdown("---")
-                st.markdown("### 📦 Kısmi Çekim Ekle (Parça Parça Taşıma)")
-                st.caption("Bir partinin sadece bir kısmı bu sefer çekildiyse (örn. 80 m³'lük partiden 40 m³) burayı kullan — kalan miktar otomatik takip edilir, parti kaybolmadan 'açık' olarak listede kalır.")
-
-                kismi_secim = st.selectbox("Hangi partiden çekim yapıldı?", secenekler_nakliye, key="kismi_nakliye_secim")
-
-                if kismi_secim:
-                    kismi_satir_no = int(kismi_secim.split("|")[0].replace("Satır", "").strip())
-                    kismi_satir_bilgi = df_bekleyen_nakliye[df_bekleyen_nakliye['SheetRow'] == kismi_satir_no].iloc[0]
-                    kismi_kalan = float(kismi_satir_bilgi['Kalan Miktar'])
-                    kismi_toplam = float(kismi_satir_bilgi['_ToplamM3'])
-
-                    col_miktar, col_not2, col_btn2 = st.columns([1, 2, 1])
-                    with col_miktar:
-                        cekilen_miktar_girisi = st.number_input("Bu Seferki Çekilen (m³)", min_value=0.0, max_value=max(kismi_kalan, 0.01), value=kismi_kalan, step=1.0, key=f"kismi_cekilen_miktar_{kismi_satir_no}")
-                    with col_not2:
-                        kismi_notu = st.text_input("Nakliye Notu (Kim getirdi / hangi araç)", placeholder="Örn: Ahmet'in kamyonuyla çekildi", key=f"kismi_nakliye_notu_{kismi_satir_no}")
-                    with col_btn2:
-                        st.write("")
-                        st.write("")
-                        if st.button("📦 Kısmi Çekimi Kaydet", type="primary", use_container_width=True):
-                            if "Çekilen Miktar" not in nakliye_headers:
-                                st.error("Kasa_Takip sayfasında 'Çekilen Miktar' sütunu bulunamadı. Sayfayı yenileyip tekrar dene.")
-                            elif cekilen_miktar_girisi <= 0:
-                                st.warning("Çekilen miktar 0'dan büyük olmalı.")
-                            else:
-                                with st.spinner("Kısmi çekim Google Sheets'e işleniyor..."):
-                                    nakliye_durum_col = nakliye_headers.index("Nakliye Durumu") + 1
-                                    nakliye_not_col = nakliye_headers.index("Nakliye Notu") + 1
-                                    cekilen_col = nakliye_headers.index("Çekilen Miktar") + 1
-
-                                    eski_cekilen = float(kismi_satir_bilgi['_CekilenM3'])
-                                    yeni_cekilen = min(eski_cekilen + cekilen_miktar_girisi, kismi_toplam)
-                                    yeni_kalan = round(kismi_toplam - yeni_cekilen, 3)
+                                for secim in secilenler_nakliye:
+                                    satir_no = int(secim.split("|")[0].replace("Satır", "").strip())
+                                    girilen = girilen_miktarlar[satir_no]
+                                    if girilen <= 0:
+                                        continue
+                                    satir_bilgi = df_bekleyen_nakliye[df_bekleyen_nakliye['SheetRow'] == satir_no].iloc[0]
+                                    toplam = float(satir_bilgi['_ToplamM3'])
+                                    eski_cekilen = float(satir_bilgi['_CekilenM3'])
+                                    yeni_cekilen = min(eski_cekilen + girilen, toplam)
+                                    yeni_kalan = round(toplam - yeni_cekilen, 3)
                                     yeni_durum = "NAKLİYE YAPILDI" if yeni_kalan <= 0.01 else "KISMİ ÇEKİLDİ"
 
-                                    eski_not = str(kismi_satir_bilgi.get("Nakliye Notu", "") or "").strip()
-                                    bugun_str = datetime.now().strftime("%d.%m.%Y")
-                                    yeni_not_parcasi = f"{bugun_str}: {cekilen_miktar_girisi:g} m³ çekildi" + (f" ({kismi_notu})" if kismi_notu else "")
+                                    eski_not = str(satir_bilgi.get("Nakliye Notu", "") or "").strip()
+                                    yeni_not_parcasi = f"{bugun_str}: {girilen:g} m³ çekildi" + (f" ({nakliye_notu})" if nakliye_notu else "")
                                     guncel_not = f"{eski_not} | {yeni_not_parcasi}" if eski_not else yeni_not_parcasi
 
-                                    kasa_sheet.update_cell(kismi_satir_no, nakliye_durum_col, yeni_durum)
-                                    kasa_sheet.update_cell(kismi_satir_no, nakliye_not_col, guncel_not)
-                                    kasa_sheet.update_cell(kismi_satir_no, cekilen_col, yeni_cekilen)
+                                    kasa_sheet.update_cell(satir_no, nakliye_durum_col, yeni_durum)
+                                    kasa_sheet.update_cell(satir_no, nakliye_not_col, guncel_not)
+                                    kasa_sheet.update_cell(satir_no, cekilen_col, yeni_cekilen)
 
-                                    if yeni_durum == "NAKLİYE YAPILDI":
-                                        st.success(f"✅ Parti tamamen çekildi olarak tamamlandı! (Toplam {kismi_toplam:g} m³)")
-                                    else:
-                                        st.success(f"📦 Kısmi çekim kaydedildi. Kalan: {yeni_kalan:g} m³ / Toplam: {kismi_toplam:g} m³")
-                                    st.rerun()
+                                    durum_metni = "tamamen çekildi" if yeni_durum == "NAKLİYE YAPILDI" else f"{yeni_kalan:g} m³ kaldı"
+                                    ozet.append(f"{satir_bilgi['İşletme']} Parti {satir_bilgi['Parti No']}: {durum_metni}")
+
+                                st.success("✅ Kaydedildi:\n\n" + "\n".join(f"- {o}" for o in ozet))
+                                st.rerun()
             else:
                 st.success("🎉 Depoda bekleyen (ödemesi yapılmış ama henüz çekilmemiş) parti yok!")
 
