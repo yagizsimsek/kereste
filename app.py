@@ -405,7 +405,13 @@ with tab_islem:
                                                             for p_row in table_pdf[1:]:
                                                                 if len(p_row) <= max(cap_idx, boy_idx, adet_idx):
                                                                     continue
-                                                                
+                                                                # PDF'deki "Toplam" özet satırını atla — Çap/Boy hücreleri boş
+                                                                # (None) olur ama Adet hücresinde genel toplam adet yazar;
+                                                                # bu satır dahil edilirse t_adet şişip %80 kuralı hiç
+                                                                # tutturulamıyordu (gerçek oranlar yanlışlıkla sulanıyordu).
+                                                                if p_row[boy_idx] is None or str(p_row[boy_idx]).strip() == '' or 'toplam' in str(p_row[0]).strip().lower():
+                                                                    continue
+
                                                                 try:
                                                                     raw_adet = str(p_row[adet_idx]).strip()
                                                                     adet_match = re.search(r'\d+', raw_adet.replace('.', ''))
