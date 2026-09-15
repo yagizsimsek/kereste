@@ -15,6 +15,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from collections import Counter
+import hashlib
 
 # SSL Uyarılarını Kapat
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -39,6 +40,87 @@ def isletme_kisalt(text):
     t = t.replace("OİM", "").replace("OBM", "").replace("MÜDÜRLÜĞÜ", "").strip()
     parcalar = t.split()
     return parcalar[-1] if parcalar else t
+
+def sayi_parse(v):
+    """'42,707' ya da '1.234,56' gibi Türkçe ondalıklı bir metni float'a çevirir, boş/bozuksa 0.0 döner."""
+    s = str(v).strip()
+    if not s:
+        return 0.0
+    if ',' in s and '.' in s:
+        s = s.replace('.', '').replace(',', '.')
+    else:
+        s = s.replace(',', '.')
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+_AGAC_TURU_ANAHTARLARI = [
+    ("ÇAM", "Çam"), ("KÖKNAR", "Köknar"), ("GÖKNAR", "Köknar"), ("LADİN", "Ladin"),
+    ("KAYIN", "Kayın"), ("MEŞE", "Meşe"), ("KAVAK", "Kavak"), ("GÜRGEN", "Gürgen"),
+    ("DİŞBUDAK", "Dişbudak"), ("SEDİR", "Sedir"), ("KESTANE", "Kestane"), ("CEVİZ", "Ceviz"),
+]
+
+def agac_turu_cikar(cinsi_metni):
+    """'3.Sn.Nb.Kl. Sarıçam Tomruk' gibi bir metinden sınıf/kalite kodlarını görmezden gelip
+    sadece ana ağaç türünü çıkarır (Sarıçam/Karaçam/Kızılçam gibi alt türler hepsi 'Çam'
+    altında toplanır — parti bazında sınıf ayrımı bu özet için önemli değil)."""
+    t = tr_upper(cinsi_metni)
+    for anahtar, etiket in _AGAC_TURU_ANAHTARLARI:
+        if anahtar in t:
+            return etiket
+    temiz = str(cinsi_metni).strip()
+    return temiz if temiz else "Bilinmeyen"
+
+def tl_formatla(deger):
+    s = f"{deger:,.0f}"
+    s = s.replace(",", "§").replace(".", ",").replace("§", ".")
+    return f"{s} ₺"
+
+def m3_formatla(deger):
+    s = f"{deger:,.1f}"
+    s = s.replace(",", "§").replace(".", ",").replace("§", ".")
+    return f"{s} m³"
+
+def nakliye_drive_senkronize(spreadsheet, df):
+    """Nakliyesi tamamlanmış partileri ana Drive dosyasında 'Nakliye_Tümü' ve her
+    İşletme + İhale Tarihi kombinasyonu için ayrı bir sekmede günceller — Excel indirmeye
+    gerek kalmadan Drive dosyası her zaman güncel dursun diye. Veri son senkronizasyondan
+    beri değişmediyse (session_state'teki hash aynıysa) tekrar Sheets'e yazmaz; aksi halde
+    her sayfa yenilemesinde (Streamlit her etkileşimde tüm sekmeleri yeniden çalıştırdığı
+    için) gereksiz API isteği atılıp kotaya takılma riski olurdu."""
+    if df.empty:
+        return False
+
+    yazilacak_df = df.copy()
+    if "Fatura" in yazilacak_df.columns:
+        yazilacak_df["Fatura"] = yazilacak_df["Fatura"].map(lambda v: "EVET" if v else "")
+
+    veri_hash = hashlib.md5(yazilacak_df.to_csv(index=False).encode("utf-8")).hexdigest()
+    if st.session_state.get("_nakliye_drive_hash") == veri_hash:
+        return False
+
+    def _sekmeye_yaz(baslik, grup_df):
+        satirlar = [grup_df.columns.tolist()] + grup_df.astype(str).values.tolist()
+        try:
+            ws = spreadsheet.worksheet(baslik)
+            ws.clear()
+        except gspread.exceptions.WorksheetNotFound:
+            ws = spreadsheet.add_worksheet(title=baslik, rows=str(len(satirlar) + 5), cols=str(len(grup_df.columns) + 2))
+        ws.update(satirlar, value_input_option="USER_ENTERED")
+
+    _sekmeye_yaz("Nakliye_Tümü", yazilacak_df)
+
+    if "İşletme" in yazilacak_df.columns and "İhale Tarihi" in yazilacak_df.columns:
+        for (isletme_adi, tarih), grup in yazilacak_df.groupby(["İşletme", "İhale Tarihi"]):
+            sekme_adi = f"Nak_{isletme_adi}_{tarih}".strip() or "Bilinmeyen"
+            for ch in ['\\', '/', '*', '[', ']', ':', '?']:
+                sekme_adi = sekme_adi.replace(ch, '-')
+            sekme_adi = sekme_adi[:40]
+            _sekmeye_yaz(sekme_adi, grup)
+
+    st.session_state["_nakliye_drive_hash"] = veri_hash
+    return True
 
 st.set_page_config(page_title="Kereste İhale & Maliyet Sistemi", layout="wide")
 
@@ -96,24 +178,25 @@ try:
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 
     client = gspread.authorize(creds)
-    sheet = client.open("Kereste_İhale_Sistemi").sheet1
+    spreadsheet = client.open("Kereste_İhale_Sistemi")
+    sheet = spreadsheet.sheet1
 
     try:
-        takip_sheet = client.open("Kereste_İhale_Sistemi").worksheet("Takip_Listesi")
+        takip_sheet = spreadsheet.worksheet("Takip_Listesi")
     except:
-        takip_sheet = client.open("Kereste_İhale_Sistemi").add_worksheet(title="Takip_Listesi", rows="100", cols="2")
+        takip_sheet = spreadsheet.add_worksheet(title="Takip_Listesi", rows="100", cols="2")
         takip_sheet.append_row(["İşletme Adı"])
 
     try:
-        kasa_sheet = client.open("Kereste_İhale_Sistemi").worksheet("Kasa_Takip")
+        kasa_sheet = spreadsheet.worksheet("Kasa_Takip")
     except:
-        kasa_sheet = client.open("Kereste_İhale_Sistemi").add_worksheet(title="Kasa_Takip", rows="100", cols="17")
+        kasa_sheet = spreadsheet.add_worksheet(title="Kasa_Takip", rows="100", cols="17")
         kasa_sheet.append_row(["İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not", "Nakliye Durumu", "Nakliye Notu", "Alan Firma", "Çekilen Miktar", "Fatura"])
 
     try:
-        mesafe_sheet = client.open("Kereste_İhale_Sistemi").worksheet("Mesafe_Tablosu")
+        mesafe_sheet = spreadsheet.worksheet("Mesafe_Tablosu")
     except:
-        mesafe_sheet = client.open("Kereste_İhale_Sistemi").add_worksheet(title="Mesafe_Tablosu", rows="100", cols="2")
+        mesafe_sheet = spreadsheet.add_worksheet(title="Mesafe_Tablosu", rows="100", cols="2")
         mesafe_sheet.append_row(["Yer", "KM"])
 
     sheets_baglantisi = True
@@ -614,6 +697,35 @@ with tab_odeme:
 
             df_bekleyen = df_kasa[df_kasa['_DurumTemiz'] != "ÖDENDİ"].copy()
 
+            st.markdown("### 📊 Bekleyen Satışların Özeti")
+            _odeme_tutar = 0.0
+            for _c in ["Taksitli Tutar", "Nakit Tutar"]:
+                if _c in df_bekleyen.columns:
+                    _odeme_tutar += df_bekleyen[_c].apply(sayi_parse).sum()
+
+            col_ozet1, col_ozet2 = st.columns([1, 2])
+            with col_ozet1:
+                st.metric("💰 Bekleyen Toplam Tutar", tl_formatla(_odeme_tutar))
+                st.metric("📦 Bekleyen Parti Sayısı", len(df_bekleyen))
+            with col_ozet2:
+                if not df_bekleyen.empty and "Cinsi" in df_bekleyen.columns and "Miktar" in df_bekleyen.columns:
+                    _tur_ozet = (
+                        df_bekleyen.assign(
+                            _AgacTuru=df_bekleyen["Cinsi"].apply(agac_turu_cikar),
+                            _MiktarSayi=df_bekleyen["Miktar"].apply(sayi_parse),
+                        )
+                        .groupby("_AgacTuru")["_MiktarSayi"].sum()
+                        .sort_values(ascending=False)
+                    )
+                    if not _tur_ozet.empty:
+                        st.markdown("**Ağaç Türüne Göre Bekleyen Miktar**")
+                        _tur_cols = st.columns(min(len(_tur_ozet), 4))
+                        for i, (tur, miktar) in enumerate(_tur_ozet.items()):
+                            _tur_cols[i % len(_tur_cols)].metric(f"🌲 {tur}", m3_formatla(miktar))
+                else:
+                    st.caption("Ağaç türü kırılımı için henüz veri yok.")
+
+            st.markdown("---")
             st.markdown("### ⏳ Son Ödeme Tarihi Yaklaşanlar (Tarih Sıralı)")
 
             if not df_bekleyen.empty:
@@ -847,6 +959,32 @@ with tab_nakliye:
             df_odemesi_biten = df_nakliye[df_nakliye['_DurumTemiz'] == "ÖDENDİ"].copy()
             df_bekleyen_nakliye = df_odemesi_biten[df_odemesi_biten['_NakliyeTemiz'] != "NAKLİYE YAPILDI"].copy()
 
+            st.markdown("### 📊 Nakliyesi Bekleyen Partilerin Özeti")
+            _nakliye_tutar = 0.0
+            for _c in ["Taksitli Tutar", "Nakit Tutar"]:
+                if _c in df_bekleyen_nakliye.columns:
+                    _nakliye_tutar += df_bekleyen_nakliye[_c].apply(sayi_parse).sum()
+
+            col_nak1, col_nak2 = st.columns([1, 2])
+            with col_nak1:
+                st.metric("💰 Depodaki Malın Değeri", tl_formatla(_nakliye_tutar))
+                st.metric("📦 Bekleyen Parti Sayısı", len(df_bekleyen_nakliye))
+            with col_nak2:
+                if not df_bekleyen_nakliye.empty and "Cinsi" in df_bekleyen_nakliye.columns:
+                    _tur_ozet_nak = (
+                        df_bekleyen_nakliye.assign(_AgacTuru=df_bekleyen_nakliye["Cinsi"].apply(agac_turu_cikar))
+                        .groupby("_AgacTuru")["Kalan Miktar"].sum()
+                        .sort_values(ascending=False)
+                    )
+                    if not _tur_ozet_nak.empty:
+                        st.markdown("**Ağaç Türüne Göre Depoda Kalan Miktar**")
+                        _tur_cols_nak = st.columns(min(len(_tur_ozet_nak), 4))
+                        for i, (tur, miktar) in enumerate(_tur_ozet_nak.items()):
+                            _tur_cols_nak[i % len(_tur_cols_nak)].metric(f"🌲 {tur}", m3_formatla(miktar))
+                else:
+                    st.caption("Ağaç türü kırılımı için henüz veri yok.")
+
+            st.markdown("---")
             st.markdown("### 📦 Depodan Çekilmeyi Bekleyen Partiler (Ödemesi Yapılmış)")
 
             if not df_bekleyen_nakliye.empty:
@@ -960,7 +1098,17 @@ with tab_nakliye:
                 else:
                     st.caption("⚠️ 'Fatura' sütunu henüz sayfada yok — Kasa & Ödeme sekmesini bir kez açıp tekrar dene, otomatik eklenecek.")
 
-                # --- İŞLETME + İHALE TARİHİ KOMBİNASYONUNA GÖRE AYRI SEKMELİ EXCEL İNDİRME ---
+                st.markdown("---")
+                st.markdown("#### ☁️ Ana Drive Dosyasına Otomatik Aktarım")
+                st.caption("Bu tablo, 'Kereste_İhale_Sistemi' dosyasında 'Nakliye_Tümü' sekmesine ve her ihale (İşletme + İhale Tarihi) için kendi ayrı sekmesine otomatik olarak işleniyor — indirmene gerek yok, Drive'da hep güncel duruyor.")
+                with st.spinner("Drive'daki sekmeler kontrol ediliyor..."):
+                    _senkron_oldu = nakliye_drive_senkronize(spreadsheet, gorsel_arsiv)
+                if _senkron_oldu:
+                    st.success("✅ Drive'daki 'Nakliye_Tümü' ve ihale bazlı sekmeler güncellendi.")
+                else:
+                    st.caption("☁️ Drive sekmeleri zaten güncel.")
+
+                # --- İŞLETME + İHALE TARİHİ KOMBİNASYONUNA GÖRE AYRI SEKMELİ EXCEL İNDİRME (opsiyonel, ekstra) ---
                 # Aynı yer (Örn. ALADAĞ) farklı tarihlerde birden fazla ihale olabilir; bunları
                 # tek sekmede birleştirmiyoruz, her ihale (yer + tarih) kendi sekmesinde ayrı duruyor.
                 excel_buffer = io.BytesIO()
