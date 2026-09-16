@@ -143,21 +143,39 @@ def nakliye_drive_senkronize(spreadsheet, df):
 
 def nakliyeci_cari_ekle(spreadsheet, nakliyeci_adi, kayitlar):
     """Bir nakliyecinin kendi 'cari' sekmesine bu seferki taşıdığı partileri ekler (İşletme,
-    tarih, cinsi/boy, çekilen miktar, ücret), ardından farklı seferler görsel olarak birbirinden
-    ayırt edilsin diye bir boş satır bırakır. Sekme yoksa otomatik oluşturulur."""
+    tarih, cinsi/boy, çekilen miktar, ücret, hesaplanan toplam nakliye), ardından farklı seferler
+    görsel olarak birbirinden ayırt edilsin diye bir boş satır bırakır. Sekme yoksa otomatik
+    oluşturulur. 'Yarısı Bireysel'/'Tevfikatlı Dip Rakam'/'Fatura No' muhasebecinin elle
+    dolduracağı sütunlar — hem Google Sheets üzerinden hem indirilen Excel'den düzenlenebilir."""
     if not nakliyeci_adi or not kayitlar:
         return
     sekme_adi = f"Cari_{nakliyeci_adi}".strip()
     for ch in ['\\', '/', '*', '[', ']', ':', '?']:
         sekme_adi = sekme_adi.replace(ch, '-')
     sekme_adi = sekme_adi[:40]
-    baslik = ["Tarih", "İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Çekilen Miktar (m³)", "Nakliye Ücreti (TL/m³)", "Not"]
+    baslik = ["Tarih", "İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Çekilen Miktar (m³)", "Nakliye Ücreti (TL/m³)", "Not", "Toplam Nakliye", "Yarısı Bireysel", "Tevfikatlı Dip Rakam", "Fatura No"]
     try:
         ws = spreadsheet.worksheet(sekme_adi)
     except gspread.exceptions.WorksheetNotFound:
         ws = spreadsheet.add_worksheet(title=sekme_adi, rows="200", cols=str(len(baslik)))
         ws.append_row(baslik)
-    ws.append_rows(kayitlar, value_input_option='USER_ENTERED')
+
+    # Eski sekmelerde bu yeni sütunlar olmayabilir — eksikse tamamla (Kasa_Takip'teki gibi).
+    if ws.col_count < len(baslik):
+        ws.add_cols(len(baslik) - ws.col_count)
+    mevcut_baslik = ws.row_values(1)
+    for i, h in enumerate(baslik):
+        if i >= len(mevcut_baslik) or mevcut_baslik[i] != h:
+            ws.update_cell(1, i + 1, h)
+
+    genisletilmis_kayitlar = []
+    for kayit in kayitlar:
+        miktar = sayi_parse(kayit[6]) if len(kayit) > 6 else 0.0
+        ucret = sayi_parse(kayit[7]) if len(kayit) > 7 else 0.0
+        toplam_nakliye = round(miktar * ucret, 2)
+        genisletilmis_kayitlar.append(list(kayit) + [toplam_nakliye, "", "", ""])
+
+    ws.append_rows(genisletilmis_kayitlar, value_input_option='USER_ENTERED')
     ws.append_row([""] * len(baslik))
 
 st.set_page_config(page_title="Kereste İhale & Maliyet Sistemi", layout="wide")
