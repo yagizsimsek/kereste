@@ -62,21 +62,34 @@ def sayi_parse(v):
         return 0.0
 
 _AGAC_TURU_ANAHTARLARI = [
-    ("ÇAM", "Çam"), ("KÖKNAR", "Köknar"), ("GÖKNAR", "Köknar"), ("LADİN", "Ladin"),
+    # Sarıçam/Karaçam kendi başlarına ayrı türler olarak isteniyor, bu yüzden genel
+    # "ÇAM" kontrolünden ÖNCE gelmeleri lazım (yoksa "SARIÇAM" içindeki "ÇAM" alt
+    # dizesi genel kurala takılıp hepsi düz "Çam" altında toplanırdı).
+    ("SARIÇAM", "Sarıçam"), ("KARAÇAM", "Karaçam"), ("ÇAM", "Çam"),
+    ("KÖKNAR", "Köknar"), ("GÖKNAR", "Köknar"), ("LADİN", "Ladin"),
     ("KAYIN", "Kayın"), ("MEŞE", "Meşe"), ("KAVAK", "Kavak"), ("GÜRGEN", "Gürgen"),
     ("DİŞBUDAK", "Dişbudak"), ("SEDİR", "Sedir"), ("KESTANE", "Kestane"), ("CEVİZ", "Ceviz"),
 ]
 
 def agac_turu_cikar(cinsi_metni):
     """'3.Sn.Nb.Kl. Sarıçam Tomruk' gibi bir metinden sınıf/kalite kodlarını görmezden gelip
-    sadece ana ağaç türünü çıkarır (Sarıçam/Karaçam/Kızılçam gibi alt türler hepsi 'Çam'
-    altında toplanır — parti bazında sınıf ayrımı bu özet için önemli değil)."""
+    ana ağaç türünü çıkarır. Sarıçam ve Karaçam kendi başlarına ayrı gösterilir; diğer
+    çam alt türleri (Kızılçam, Fıstıçam vb.) genel 'Çam' altında toplanır."""
     t = tr_upper(cinsi_metni)
     for anahtar, etiket in _AGAC_TURU_ANAHTARLARI:
         if anahtar in t:
             return etiket
     temiz = str(cinsi_metni).strip()
     return temiz if temiz else "Bilinmeyen"
+
+def urun_tipi_cikar(cinsi_metni):
+    """Cinsi metninde 'Maden Direği' gibi tomruktan farklı bir ürün tipi geçiyorsa onu
+    döndürür (yoksa boş string) — aynı tür+boy'un tomruğu ile maden direği fiyat/talep
+    açısından farklı olduğu için özet panellerinde ayrı gösterilmesi isteniyor."""
+    t = tr_upper(cinsi_metni)
+    if "MADEN DİR" in t:
+        return "Maden Direği"
+    return ""
 
 def tl_formatla(deger):
     s = f"{deger:,.0f}"
@@ -851,16 +864,18 @@ with tab_odeme:
                         df_bekleyen.assign(
                             _AgacTuru=df_bekleyen["Cinsi"].apply(agac_turu_cikar),
                             _Boy=_boy_kolonu,
+                            _UrunTipi=df_bekleyen["Cinsi"].apply(urun_tipi_cikar),
                             _MiktarSayi=df_bekleyen["Miktar"].apply(sayi_parse),
                         )
-                        .groupby(["_AgacTuru", "_Boy"])["_MiktarSayi"].sum()
+                        .groupby(["_AgacTuru", "_Boy", "_UrunTipi"])["_MiktarSayi"].sum()
                         .sort_values(ascending=False)
                     )
                     if not _tur_ozet.empty:
                         st.markdown("**Ağaç Türü ve Boya Göre Bekleyen Miktar**")
                         _tur_cols = st.columns(min(len(_tur_ozet), 4))
-                        for i, ((tur, boy), miktar) in enumerate(_tur_ozet.items()):
-                            _tur_cols[i % len(_tur_cols)].metric(f"🌲 {tur} {boy}", m3_formatla(miktar))
+                        for i, ((tur, boy, urun_tipi), miktar) in enumerate(_tur_ozet.items()):
+                            etiket = f"{tur} {boy}" + (f" ({urun_tipi})" if urun_tipi else "")
+                            _tur_cols[i % len(_tur_cols)].metric(f"🌲 {etiket}", m3_formatla(miktar))
                 else:
                     st.caption("Ağaç türü kırılımı için henüz veri yok.")
 
@@ -1137,15 +1152,20 @@ with tab_nakliye:
                 if not df_bekleyen_nakliye.empty and "Cinsi" in df_bekleyen_nakliye.columns:
                     _boy_kolonu_nak = df_bekleyen_nakliye["Boy"].astype(str).str.strip().replace("", "?") if "Boy" in df_bekleyen_nakliye.columns else "?"
                     _tur_ozet_nak = (
-                        df_bekleyen_nakliye.assign(_AgacTuru=df_bekleyen_nakliye["Cinsi"].apply(agac_turu_cikar), _Boy=_boy_kolonu_nak)
-                        .groupby(["_AgacTuru", "_Boy"])["Kalan Miktar"].sum()
+                        df_bekleyen_nakliye.assign(
+                            _AgacTuru=df_bekleyen_nakliye["Cinsi"].apply(agac_turu_cikar),
+                            _Boy=_boy_kolonu_nak,
+                            _UrunTipi=df_bekleyen_nakliye["Cinsi"].apply(urun_tipi_cikar),
+                        )
+                        .groupby(["_AgacTuru", "_Boy", "_UrunTipi"])["Kalan Miktar"].sum()
                         .sort_values(ascending=False)
                     )
                     if not _tur_ozet_nak.empty:
                         st.markdown("**Ağaç Türü ve Boya Göre Depoda Kalan Miktar**")
                         _tur_cols_nak = st.columns(min(len(_tur_ozet_nak), 4))
-                        for i, ((tur, boy), miktar) in enumerate(_tur_ozet_nak.items()):
-                            _tur_cols_nak[i % len(_tur_cols_nak)].metric(f"🌲 {tur} {boy}", m3_formatla(miktar))
+                        for i, ((tur, boy, urun_tipi), miktar) in enumerate(_tur_ozet_nak.items()):
+                            etiket = f"{tur} {boy}" + (f" ({urun_tipi})" if urun_tipi else "")
+                            _tur_cols_nak[i % len(_tur_cols_nak)].metric(f"🌲 {etiket}", m3_formatla(miktar))
                 else:
                     st.caption("Ağaç türü kırılımı için henüz veri yok.")
 
