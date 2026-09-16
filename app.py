@@ -940,40 +940,40 @@ with tab_odeme:
                 _ucret_sayi_kasa = df_bekleyen["Nakliye Ücreti"].apply(sayi_parse) if "Nakliye Ücreti" in df_bekleyen.columns else 0.0
                 df_bekleyen["Gerçek Birim Maliyet"] = (_birim_sayi + _ucret_sayi_kasa).round(2)
 
-            st.markdown("### 📊 Bekleyen Satışların Özeti")
-            _odeme_tutar = 0.0
-            if not df_bekleyen.empty:
-                for _c in ["Taksitli Tutar", "Nakit Tutar"]:
-                    if _c in df_bekleyen.columns:
-                        _odeme_tutar += float(df_bekleyen[_c].apply(sayi_parse).sum())
+            with st.expander("📊 Bekleyen Satışların Özeti (Tutar + Gerçek Maliyet)"):
+                _odeme_tutar = 0.0
+                if not df_bekleyen.empty:
+                    for _c in ["Taksitli Tutar", "Nakit Tutar"]:
+                        if _c in df_bekleyen.columns:
+                            _odeme_tutar += float(df_bekleyen[_c].apply(sayi_parse).sum())
 
-            col_ozet1, col_ozet2 = st.columns([1, 2])
-            with col_ozet1:
-                st.metric("💰 Bekleyen Toplam Tutar", tl_formatla(_odeme_tutar))
-                st.metric("📦 Bekleyen Parti Sayısı", len(df_bekleyen))
-            with col_ozet2:
-                if not df_bekleyen.empty and "Cinsi" in df_bekleyen.columns and "Miktar" in df_bekleyen.columns:
-                    # Türe göre değil, tür+boy kombinasyonuna göre kırıyoruz (Örn. "Çam 3" ve
-                    # "Çam 4" ayrı gösterilsin) — ama sınıf/kalite koduna kadar inmiyoruz.
-                    _boy_kolonu = df_bekleyen["Boy"].astype(str).str.strip().replace("", "?") if "Boy" in df_bekleyen.columns else "?"
-                    _tur_ozet = (
-                        df_bekleyen.assign(
-                            _AgacTuru=df_bekleyen["Cinsi"].apply(agac_turu_cikar),
-                            _Boy=_boy_kolonu,
-                            _UrunTipi=df_bekleyen["Cinsi"].apply(urun_tipi_cikar),
-                            _MiktarSayi=df_bekleyen["Miktar"].apply(sayi_parse),
+                col_ozet1, col_ozet2 = st.columns([1, 2])
+                with col_ozet1:
+                    st.metric("💰 Bekleyen Toplam Tutar", tl_formatla(_odeme_tutar))
+                    st.metric("📦 Bekleyen Parti Sayısı", len(df_bekleyen))
+                with col_ozet2:
+                    if not df_bekleyen.empty and "Cinsi" in df_bekleyen.columns and "Miktar" in df_bekleyen.columns:
+                        # Türe göre değil, tür+boy kombinasyonuna göre kırıyoruz (Örn. "Çam 3" ve
+                        # "Çam 4" ayrı gösterilsin) — ama sınıf/kalite koduna kadar inmiyoruz.
+                        _boy_kolonu = df_bekleyen["Boy"].astype(str).str.strip().replace("", "?") if "Boy" in df_bekleyen.columns else "?"
+                        _tur_ozet = (
+                            df_bekleyen.assign(
+                                _AgacTuru=df_bekleyen["Cinsi"].apply(agac_turu_cikar),
+                                _Boy=_boy_kolonu,
+                                _UrunTipi=df_bekleyen["Cinsi"].apply(urun_tipi_cikar),
+                                _MiktarSayi=df_bekleyen["Miktar"].apply(sayi_parse),
+                            )
+                            .groupby(["_AgacTuru", "_Boy", "_UrunTipi"])["_MiktarSayi"].sum()
+                            .sort_values(ascending=False)
                         )
-                        .groupby(["_AgacTuru", "_Boy", "_UrunTipi"])["_MiktarSayi"].sum()
-                        .sort_values(ascending=False)
-                    )
-                    if not _tur_ozet.empty:
-                        st.markdown("**Ağaç Türü ve Boya Göre Bekleyen Miktar**")
-                        _tur_cols = st.columns(min(len(_tur_ozet), 4))
-                        for i, ((tur, boy, urun_tipi), miktar) in enumerate(_tur_ozet.items()):
-                            etiket = f"{tur} {boy}" + (f" ({urun_tipi})" if urun_tipi else "")
-                            _tur_cols[i % len(_tur_cols)].metric(f"🌲 {etiket}", m3_formatla(miktar))
-                else:
-                    st.caption("Ağaç türü kırılımı için henüz veri yok.")
+                        if not _tur_ozet.empty:
+                            st.markdown("**Ağaç Türü ve Boya Göre Bekleyen Miktar**")
+                            _tur_cols = st.columns(min(len(_tur_ozet), 4))
+                            for i, ((tur, boy, urun_tipi), miktar) in enumerate(_tur_ozet.items()):
+                                etiket = f"{tur} {boy}" + (f" ({urun_tipi})" if urun_tipi else "")
+                                _tur_cols[i % len(_tur_cols)].metric(f"🌲 {etiket}", m3_formatla(miktar))
+                    else:
+                        st.caption("Ağaç türü kırılımı için henüz veri yok.")
 
             if not df_bekleyen.empty and "Son Ödeme Tarihi" in df_bekleyen.columns:
                 with st.expander("📅 Güne Göre Ödeme Takvimi (Toplu Görünüm)"):
@@ -1298,37 +1298,37 @@ with tab_nakliye:
             df_odemesi_biten = df_nakliye[df_nakliye['_DurumTemiz'] == "ÖDENDİ"].copy()
             df_bekleyen_nakliye = df_odemesi_biten[df_odemesi_biten['_NakliyeTemiz'] != "NAKLİYE YAPILDI"].copy()
 
-            st.markdown("### 📊 Nakliyesi Bekleyen Partilerin Özeti")
-            _nakliye_tutar = 0.0
-            if not df_bekleyen_nakliye.empty:
-                for _c in ["Taksitli Tutar", "Nakit Tutar"]:
-                    if _c in df_bekleyen_nakliye.columns:
-                        _nakliye_tutar += float(df_bekleyen_nakliye[_c].apply(sayi_parse).sum())
+            with st.expander("📊 Nakliyesi Bekleyen Partilerin Özeti"):
+                _nakliye_tutar = 0.0
+                if not df_bekleyen_nakliye.empty:
+                    for _c in ["Taksitli Tutar", "Nakit Tutar"]:
+                        if _c in df_bekleyen_nakliye.columns:
+                            _nakliye_tutar += float(df_bekleyen_nakliye[_c].apply(sayi_parse).sum())
 
-            col_nak1, col_nak2 = st.columns([1, 2])
-            with col_nak1:
-                st.metric("💰 Depodaki Malın Değeri", tl_formatla(_nakliye_tutar))
-                st.metric("📦 Bekleyen Parti Sayısı", len(df_bekleyen_nakliye))
-            with col_nak2:
-                if not df_bekleyen_nakliye.empty and "Cinsi" in df_bekleyen_nakliye.columns:
-                    _boy_kolonu_nak = df_bekleyen_nakliye["Boy"].astype(str).str.strip().replace("", "?") if "Boy" in df_bekleyen_nakliye.columns else "?"
-                    _tur_ozet_nak = (
-                        df_bekleyen_nakliye.assign(
-                            _AgacTuru=df_bekleyen_nakliye["Cinsi"].apply(agac_turu_cikar),
-                            _Boy=_boy_kolonu_nak,
-                            _UrunTipi=df_bekleyen_nakliye["Cinsi"].apply(urun_tipi_cikar),
+                col_nak1, col_nak2 = st.columns([1, 2])
+                with col_nak1:
+                    st.metric("💰 Depodaki Malın Değeri", tl_formatla(_nakliye_tutar))
+                    st.metric("📦 Bekleyen Parti Sayısı", len(df_bekleyen_nakliye))
+                with col_nak2:
+                    if not df_bekleyen_nakliye.empty and "Cinsi" in df_bekleyen_nakliye.columns:
+                        _boy_kolonu_nak = df_bekleyen_nakliye["Boy"].astype(str).str.strip().replace("", "?") if "Boy" in df_bekleyen_nakliye.columns else "?"
+                        _tur_ozet_nak = (
+                            df_bekleyen_nakliye.assign(
+                                _AgacTuru=df_bekleyen_nakliye["Cinsi"].apply(agac_turu_cikar),
+                                _Boy=_boy_kolonu_nak,
+                                _UrunTipi=df_bekleyen_nakliye["Cinsi"].apply(urun_tipi_cikar),
+                            )
+                            .groupby(["_AgacTuru", "_Boy", "_UrunTipi"])["Kalan Miktar"].sum()
+                            .sort_values(ascending=False)
                         )
-                        .groupby(["_AgacTuru", "_Boy", "_UrunTipi"])["Kalan Miktar"].sum()
-                        .sort_values(ascending=False)
-                    )
-                    if not _tur_ozet_nak.empty:
-                        st.markdown("**Ağaç Türü ve Boya Göre Depoda Kalan Miktar**")
-                        _tur_cols_nak = st.columns(min(len(_tur_ozet_nak), 4))
-                        for i, ((tur, boy, urun_tipi), miktar) in enumerate(_tur_ozet_nak.items()):
-                            etiket = f"{tur} {boy}" + (f" ({urun_tipi})" if urun_tipi else "")
-                            _tur_cols_nak[i % len(_tur_cols_nak)].metric(f"🌲 {etiket}", m3_formatla(miktar))
-                else:
-                    st.caption("Ağaç türü kırılımı için henüz veri yok.")
+                        if not _tur_ozet_nak.empty:
+                            st.markdown("**Ağaç Türü ve Boya Göre Depoda Kalan Miktar**")
+                            _tur_cols_nak = st.columns(min(len(_tur_ozet_nak), 4))
+                            for i, ((tur, boy, urun_tipi), miktar) in enumerate(_tur_ozet_nak.items()):
+                                etiket = f"{tur} {boy}" + (f" ({urun_tipi})" if urun_tipi else "")
+                                _tur_cols_nak[i % len(_tur_cols_nak)].metric(f"🌲 {etiket}", m3_formatla(miktar))
+                    else:
+                        st.caption("Ağaç türü kırılımı için henüz veri yok.")
 
             st.markdown("---")
             st.markdown("### 📦 Depodan Çekilmeyi Bekleyen Partiler (Ödemesi Yapılmış)")
