@@ -902,10 +902,25 @@ with tab_odeme:
 
             if not df_bekleyen.empty:
                 df_bekleyen['Tarih_Formatli'] = pd.to_datetime(df_bekleyen['Son Ödeme Tarihi'], format='%d.%m.%Y', errors='coerce')
-                df_bekleyen = df_bekleyen.sort_values(by='Tarih_Formatli', ascending=True).drop(columns=['Tarih_Formatli'])
+                df_bekleyen = df_bekleyen.sort_values(by='Tarih_Formatli', ascending=True)
+
+                # Son ödeme tarihi geçmiş ama hâlâ ödenmemiş partiler gözden kaçmasın diye
+                # "Durum" sütununda büyük harfle GECİKTİ yazılıyor ve satır kırmızıya boyanıyor.
+                bugun_ts = pd.Timestamp(datetime.now().date())
+                df_bekleyen['_Gecikti'] = df_bekleyen['Tarih_Formatli'] < bugun_ts
 
                 gorsel_kolonlar_kasa = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Gerçek Birim Maliyet", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum"] if c in df_bekleyen.columns]
-                st.dataframe(df_bekleyen[gorsel_kolonlar_kasa], use_container_width=True)
+                gorsel_df_kasa = df_bekleyen[gorsel_kolonlar_kasa].copy()
+                if "Durum" in gorsel_df_kasa.columns:
+                    gorsel_df_kasa.loc[df_bekleyen['_Gecikti'], "Durum"] = "🔴 GECİKTİ"
+
+                def _gecikme_renklendir(row):
+                    gecikti = df_bekleyen.loc[row.name, '_Gecikti'] if row.name in df_bekleyen.index else False
+                    return ['background-color: #ffcdd2; color: #b71c1c; font-weight: bold' if gecikti else '' for _ in row]
+
+                st.dataframe(gorsel_df_kasa.style.apply(_gecikme_renklendir, axis=1), use_container_width=True)
+
+                df_bekleyen = df_bekleyen.drop(columns=['Tarih_Formatli', '_Gecikti'])
 
                 st.markdown("### ✅ Ödemeyi Gerçekleştir ve Listeden Sil")
 
