@@ -153,7 +153,7 @@ def nakliyeci_cari_ekle(spreadsheet, nakliyeci_adi, kayitlar):
     for ch in ['\\', '/', '*', '[', ']', ':', '?']:
         sekme_adi = sekme_adi.replace(ch, '-')
     sekme_adi = sekme_adi[:40]
-    baslik = ["Tarih", "İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Çekilen Miktar (m³)", "Nakliye Ücreti (TL/m³)", "Not", "Toplam Nakliye", "Yarısı Bireysel", "Tevfikatlı Dip Rakam", "Fatura No"]
+    baslik = ["Tarih", "İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Çekilen Miktar (m³)", "Nakliye Ücreti (TL/m³)", "Not", "Toplam Nakliye", "Bireysel", "Tevfikatlı Dip Rakam", "Fatura No"]
     try:
         ws = spreadsheet.worksheet(sekme_adi)
     except gspread.exceptions.WorksheetNotFound:
