@@ -101,6 +101,13 @@ def m3_formatla(deger):
     s = s.replace(",", "§").replace(".", ",").replace("§", ".")
     return f"{s} m³"
 
+_TR_AYLAR = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
+_TR_GUNLER = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
+
+def tarih_tr_formatla(ts):
+    """pandas Timestamp -> '28 Eylül 2026 Pazartesi' gibi Türkçe okunaklı tarih."""
+    return f"{ts.day} {_TR_AYLAR[ts.month - 1]} {ts.year} {_TR_GUNLER[ts.weekday()]}"
+
 def siralanabilir_yap(df, sayi_kolonlari=None, tarih_kolonlari=None):
     """Google Sheets'ten ham metin olarak gelen Türkçe ondalıklı sayıları ve
     dd.mm.yyyy tarihlerini gerçek sayı/tarih tipine çevirir. Bunu yapmazsak
@@ -967,6 +974,31 @@ with tab_odeme:
                             _tur_cols[i % len(_tur_cols)].metric(f"🌲 {etiket}", m3_formatla(miktar))
                 else:
                     st.caption("Ağaç türü kırılımı için henüz veri yok.")
+
+            if not df_bekleyen.empty and "Son Ödeme Tarihi" in df_bekleyen.columns:
+                with st.expander("📅 Güne Göre Ödeme Takvimi (Toplu Görünüm)"):
+                    _gunluk_df = df_bekleyen.assign(
+                        _GunTarih=pd.to_datetime(df_bekleyen["Son Ödeme Tarihi"], format='%d.%m.%Y', errors='coerce'),
+                        _Taksitli=df_bekleyen["Taksitli Tutar"].apply(sayi_parse) if "Taksitli Tutar" in df_bekleyen.columns else 0.0,
+                        _Nakit=df_bekleyen["Nakit Tutar"].apply(sayi_parse) if "Nakit Tutar" in df_bekleyen.columns else 0.0,
+                    ).dropna(subset=["_GunTarih"])
+
+                    _gunluk_ozet = _gunluk_df.groupby("_GunTarih")[["_Taksitli", "_Nakit"]].sum().sort_index()
+
+                    if _gunluk_ozet.empty:
+                        st.caption("Gösterilecek ödeme tarihi bulunamadı.")
+                    else:
+                        _bugun_ts = pd.Timestamp(datetime.now().date())
+                        _gun_cols = st.columns(3)
+                        for i, (gun, satir) in enumerate(_gunluk_ozet.iterrows()):
+                            _gecikti_mi = gun < _bugun_ts
+                            with _gun_cols[i % 3]:
+                                with st.container(border=True):
+                                    baslik = ("🔴 " if _gecikti_mi else "🗓️ ") + tarih_tr_formatla(gun)
+                                    st.markdown(f"**{baslik}**")
+                                    st.markdown(f"Taksitli: **{tl_formatla(satir['_Taksitli'])}**")
+                                    st.markdown(f"Nakit: **{tl_formatla(satir['_Nakit'])}**")
+                                    st.caption(f"Toplam: {tl_formatla(satir['_Taksitli'] + satir['_Nakit'])}")
 
             st.markdown("---")
             st.markdown("### ⏳ Son Ödeme Tarihi Yaklaşanlar (Tarih Sıralı)")
