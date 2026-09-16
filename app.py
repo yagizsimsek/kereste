@@ -840,7 +840,13 @@ with tab_gecmis:
                         df = df[_kolon_sirasi]
 
                     df_filtered = df.copy()
-                    
+
+                    _maliyet_goster = st.checkbox(
+                        "💰 Gerçek Maliyet ve Nakliye Ücretini Göster",
+                        value=False,
+                        help="Varsayılan olarak gizli — tek tıkla açılır/kapanır. CSV indirmede her zaman dahil edilir.",
+                    )
+
                     st.markdown("##### 🔍 Tabloyu Filtrele")
                     with st.expander("Filtreleri Göster / Gizle", expanded=False):
                         num_columns = 3
@@ -873,8 +879,13 @@ with tab_gecmis:
                             if selected_values:
                                 df_filtered = df_filtered[df_filtered[col_name].isin(selected_values)]
 
+                    _gosterilecek_df = df_filtered
+                    if not _maliyet_goster:
+                        _gizli_kolonlar = [c for c in ["Gerçek Maliyet (TL/m³)", "Nakliye Ücreti (TL/m³)"] if c in _gosterilecek_df.columns]
+                        _gosterilecek_df = _gosterilecek_df.drop(columns=_gizli_kolonlar)
+
                     st.dataframe(
-                        df_filtered,
+                        _gosterilecek_df,
                         column_config=siralama_column_config(tarih_kolonlari=["Tarih"]),
                         use_container_width=True,
                     )
