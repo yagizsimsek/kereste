@@ -101,6 +101,34 @@ def m3_formatla(deger):
     s = s.replace(",", "§").replace(".", ",").replace("§", ".")
     return f"{s} m³"
 
+def siralanabilir_yap(df, sayi_kolonlari=None, tarih_kolonlari=None):
+    """Google Sheets'ten ham metin olarak gelen Türkçe ondalıklı sayıları ve
+    dd.mm.yyyy tarihlerini gerçek sayı/tarih tipine çevirir. Bunu yapmazsak
+    Streamlit tablosunda bir sütun başlığına tıklayıp sıralatmak METİN
+    (alfabetik) sıralaması yapıyordu — Örn. '10.09.2026' tarihi '2.06.2026'dan
+    önce geliyordu, ya da '9,5' değeri '10,2'den büyük çıkıyordu. Görünüm,
+    çağıran taraftaki column_config (siralama_column_config) ile Türkçe/
+    dd.mm.yyyy kalmaya devam ediyor, sadece alttaki tip düzeliyor."""
+    df = df.copy()
+    for kol in (sayi_kolonlari or []):
+        if kol in df.columns:
+            df[kol] = df[kol].apply(sayi_parse)
+    for kol in (tarih_kolonlari or []):
+        if kol in df.columns:
+            df[kol] = pd.to_datetime(df[kol], format='%d.%m.%Y', errors='coerce')
+    return df
+
+def siralama_column_config(sayi_format_kolonlari=None, tarih_kolonlari=None):
+    """sayi_format_kolonlari: {'Kolon Adı': '%.2f'} gibi bir sözlük. Değerler
+    gerçek sayı/tarih tipine çevrildikten sonra bu, görünümü eskisi gibi
+    (Türkçe / dd.mm.yyyy) tutmak için kullanılıyor."""
+    cfg = {}
+    for kol, fmt in (sayi_format_kolonlari or {}).items():
+        cfg[kol] = st.column_config.NumberColumn(kol, format=fmt)
+    for kol in (tarih_kolonlari or []):
+        cfg[kol] = st.column_config.DateColumn(kol, format="DD.MM.YYYY")
+    return cfg
+
 def nakliye_drive_senkronize(spreadsheet, df):
     """Nakliyesi tamamlanmış partileri ana Drive dosyasında 'Nakliye_Tümü' ve her
     İşletme + İhale Tarihi kombinasyonu için ayrı bir sekmede günceller — Excel indirmeye
@@ -369,7 +397,15 @@ with tab_islem:
         with st.expander("📍 Mesafe ve Nakliye Ücreti Tablosunu Görüntüle / Elle Ekle"):
             mesafe_goster = mesafe_sheet.get_all_values()
             if len(mesafe_goster) > 1:
-                st.dataframe(pd.DataFrame(mesafe_goster[1:], columns=mesafe_goster[0]), use_container_width=True)
+                _mesafe_df_goster = siralanabilir_yap(
+                    pd.DataFrame(mesafe_goster[1:], columns=mesafe_goster[0]),
+                    sayi_kolonlari=["KM", "Nakliye Ücreti (TL/m³)"],
+                )
+                st.dataframe(
+                    _mesafe_df_goster,
+                    column_config=siralama_column_config(sayi_format_kolonlari={"KM": "%.0f", "Nakliye Ücreti (TL/m³)": "%.0f"}),
+                    use_container_width=True,
+                )
             else:
                 st.caption("Henüz kayıtlı mesafe yok.")
             col_yer, col_km, col_ucret, col_ekle = st.columns([2, 1, 1, 1])
@@ -768,6 +804,21 @@ with tab_gecmis:
 
                         df[col] = df[col].apply(turkce_sayiyi_duzelt)
 
+                    # turkce_sayiyi_duzelt hücre hücre int/float/orijinal metin döndürür;
+                    # bir sütunun TÜM değerleri sayısalsa sütunu gerçek float dtype'a
+                    # çeviriyoruz — yoksa sütun "object" (karışık int/float) kalıp
+                    # Streamlit tablosunda başlığa tıklayınca metin gibi (alfabetik)
+                    # sıralanıyordu (Örn. 9,5 > 10,2 yanlış çıkıyordu).
+                    for col in df.columns:
+                        _dolu = df[col].dropna()
+                        if not _dolu.empty and _dolu.apply(lambda v: isinstance(v, (int, float))).all():
+                            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+                    # Tarih sütunu da gerçek tarih tipine çevrilmezse aynı şekilde
+                    # alfabetik sıralanıp (10.09.2026, 2.06.2026'dan önce gelir gibi) yanlış sonuç verirdi.
+                    if "Tarih" in df.columns:
+                        df["Tarih"] = pd.to_datetime(df["Tarih"], format='%d.%m.%Y', errors='coerce')
+
                     # Gerçek Maliyet = m³ Teklifimiz + Nakliye Ücreti — ihalede ucuz görünen
                     # bir m³ fiyatı, nakliyesi pahalıysa gerçekte daha maliyetli olabiliyor;
                     # bu yüzden ana kalem olarak teklif fiyatının hemen yanına ekliyoruz.
@@ -789,26 +840,46 @@ with tab_gecmis:
                         filter_cols = st.columns(num_columns)
                         
                         for i, col_name in enumerate(df.columns):
+                            if pd.api.types.is_datetime64_any_dtype(df[col_name]):
+                                # Tarih sütunu: filtre kutusunda dd.mm.yyyy göster,
+                                # ama karşılaştırmayı gerçek tarih değeriyle yap.
+                                tarih_degerleri = sorted(df[col_name].dropna().unique().tolist())
+                                etiketler = [pd.Timestamp(v).strftime('%d.%m.%Y') for v in tarih_degerleri]
+                                secilen_etiketler = filter_cols[i % num_columns].multiselect(
+                                    label=f"{col_name}", options=etiketler, default=[]
+                                )
+                                if secilen_etiketler:
+                                    secilen_tarihler = [pd.to_datetime(e, format='%d.%m.%Y') for e in secilen_etiketler]
+                                    df_filtered = df_filtered[df_filtered[col_name].isin(secilen_tarihler)]
+                                continue
+
                             unique_values = df[col_name].dropna().unique().tolist()
                             try: unique_values.sort()
                             except TypeError: unique_values.sort(key=lambda x: str(x))
-                                
+
                             selected_values = filter_cols[i % num_columns].multiselect(
                                 label=f"{col_name}",
                                 options=unique_values,
                                 default=[]
                             )
-                            
+
                             if selected_values:
                                 df_filtered = df_filtered[df_filtered[col_name].isin(selected_values)]
 
-                    st.dataframe(df_filtered, use_container_width=True)
+                    st.dataframe(
+                        df_filtered,
+                        column_config=siralama_column_config(tarih_kolonlari=["Tarih"]),
+                        use_container_width=True,
+                    )
                     
                     col1, col2 = st.columns(2)
                     with col1:
                         st.caption(f"Filtrelenmiş Sonuç: **{len(df_filtered)}** / Toplam: **{len(df)}** adet ihale gösteriliyor.")
                     with col2:
-                        csv = df_filtered.to_csv(index=False).encode('utf-8')
+                        _csv_df = df_filtered.copy()
+                        if "Tarih" in _csv_df.columns:
+                            _csv_df["Tarih"] = _csv_df["Tarih"].dt.strftime('%d.%m.%Y')
+                        csv = _csv_df.to_csv(index=False).encode('utf-8')
                         st.download_button(
                             label="📥 Süzülmüş Tabloyu İndir (CSV)",
                             data=csv,
@@ -911,14 +982,27 @@ with tab_odeme:
 
                 gorsel_kolonlar_kasa = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Gerçek Birim Maliyet", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum"] if c in df_bekleyen.columns]
                 gorsel_df_kasa = df_bekleyen[gorsel_kolonlar_kasa].copy()
+                gorsel_df_kasa = siralanabilir_yap(
+                    gorsel_df_kasa,
+                    sayi_kolonlari=["Parti No", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar"],
+                    tarih_kolonlari=["İhale Tarihi", "Son Ödeme Tarihi"],
+                )
                 if "Durum" in gorsel_df_kasa.columns:
-                    gorsel_df_kasa.loc[df_bekleyen['_Gecikti'], "Durum"] = "🔴 GECİKTİ"
+                    gorsel_df_kasa.loc[df_bekleyen['_Gecikti'].values, "Durum"] = "🔴 GECİKTİ"
 
-                def _gecikme_renklendir(row):
-                    gecikti = df_bekleyen.loc[row.name, '_Gecikti'] if row.name in df_bekleyen.index else False
-                    return ['background-color: #ffcdd2; color: #b71c1c; font-weight: bold' if gecikti else '' for _ in row]
-
-                st.dataframe(gorsel_df_kasa.style.apply(_gecikme_renklendir, axis=1), use_container_width=True)
+                # NOT: pandas Styler (satırı kırmızıya boyama) ile column_config (tarih/sayı
+                # biçimlendirme + doğru sıralama) Streamlit'te birlikte çalışmıyor — Styler
+                # kullanınca column_config sessizce yok sayılıp tarihler ham ISO, sayılar 6
+                # haneli ondalık görünüyordu. Sıralama/biçim önceliği olduğu için Styler'ı
+                # kaldırdık; GECİKTİ hâlâ "Durum" sütununda kırmızı emoji + büyük harfle duruyor.
+                st.dataframe(
+                    gorsel_df_kasa,
+                    column_config=siralama_column_config(
+                        sayi_format_kolonlari={"Parti No": "%d", "Miktar": "%.3f", "Birim Fiyat": "%.2f", "Taksitli Tutar": "%.2f", "Nakit Tutar": "%.2f"},
+                        tarih_kolonlari=["İhale Tarihi", "Son Ödeme Tarihi"],
+                    ),
+                    use_container_width=True,
+                )
 
                 df_bekleyen = df_bekleyen.drop(columns=['Tarih_Formatli', '_Gecikti'])
 
@@ -964,7 +1048,19 @@ with tab_odeme:
             df_odenen = df_kasa[df_kasa['_DurumTemiz'] == "ÖDENDİ"].copy()
             if not df_odenen.empty:
                 arsiv_kolonlar_kasa = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not"] if c in df_odenen.columns]
-                st.dataframe(df_odenen[arsiv_kolonlar_kasa], use_container_width=True)
+                gorsel_df_odenen = siralanabilir_yap(
+                    df_odenen[arsiv_kolonlar_kasa],
+                    sayi_kolonlari=["Parti No", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar"],
+                    tarih_kolonlari=["İhale Tarihi", "Son Ödeme Tarihi"],
+                )
+                st.dataframe(
+                    gorsel_df_odenen,
+                    column_config=siralama_column_config(
+                        sayi_format_kolonlari={"Parti No": "%d", "Miktar": "%.3f", "Birim Fiyat": "%.2f", "Taksitli Tutar": "%.2f", "Nakit Tutar": "%.2f"},
+                        tarih_kolonlari=["İhale Tarihi", "Son Ödeme Tarihi"],
+                    ),
+                    use_container_width=True,
+                )
             else:
                 st.caption("Henüz ödemesi yapılıp arşivlenen bir parti bulunmuyor.")
         else:
@@ -1210,7 +1306,19 @@ with tab_nakliye:
                 df_bekleyen_nakliye = df_bekleyen_nakliye.sort_values(by='Tarih_Formatli', ascending=True).drop(columns=['Tarih_Formatli'])
 
                 gorsel_kolonlar = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Kalan Miktar", "Nakliye Durumu", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi"] if c in df_bekleyen_nakliye.columns]
-                st.dataframe(df_bekleyen_nakliye[gorsel_kolonlar], use_container_width=True)
+                gorsel_df_nakliye_bekleyen = siralanabilir_yap(
+                    df_bekleyen_nakliye[gorsel_kolonlar],
+                    sayi_kolonlari=["Parti No", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar"],
+                    tarih_kolonlari=["İhale Tarihi", "Son Ödeme Tarihi"],
+                )
+                st.dataframe(
+                    gorsel_df_nakliye_bekleyen,
+                    column_config=siralama_column_config(
+                        sayi_format_kolonlari={"Parti No": "%d", "Miktar": "%.3f", "Kalan Miktar": "%.3f", "Birim Fiyat": "%.2f", "Taksitli Tutar": "%.2f", "Nakit Tutar": "%.2f"},
+                        tarih_kolonlari=["İhale Tarihi", "Son Ödeme Tarihi"],
+                    ),
+                    use_container_width=True,
+                )
 
                 secenekler_nakliye = []
                 for idx, row in df_bekleyen_nakliye.iterrows():
@@ -1339,12 +1447,21 @@ with tab_nakliye:
 
                 arsiv_kolonlar = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Nakliye Ücreti", "Nakliyeci", "Nakliye Notu", "Fatura"] if c in df_nakliye_tamam.columns]
                 gorsel_arsiv = df_nakliye_tamam[arsiv_kolonlar].copy()
+                gorsel_arsiv = siralanabilir_yap(
+                    gorsel_arsiv,
+                    sayi_kolonlari=["Parti No", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Nakliye Ücreti"],
+                    tarih_kolonlari=["İhale Tarihi", "Son Ödeme Tarihi"],
+                )
+
+                _arsiv_column_config = siralama_column_config(
+                    sayi_format_kolonlari={"Parti No": "%d", "Miktar": "%.3f", "Birim Fiyat": "%.2f", "Taksitli Tutar": "%.2f", "Nakit Tutar": "%.2f", "Nakliye Ücreti": "%.2f"},
+                    tarih_kolonlari=["İhale Tarihi", "Son Ödeme Tarihi"],
+                )
+                _arsiv_column_config["Fatura"] = st.column_config.CheckboxColumn("📄 Fatura Geldi mi?", help="Muhasebeci fatura geldiğinde burayı tikleyip geçecek.")
 
                 duzenlenen_arsiv = st.data_editor(
                     gorsel_arsiv,
-                    column_config={
-                        "Fatura": st.column_config.CheckboxColumn("📄 Fatura Geldi mi?", help="Muhasebeci fatura geldiğinde burayı tikleyip geçecek."),
-                    },
+                    column_config=_arsiv_column_config,
                     disabled=[c for c in arsiv_kolonlar if c != "Fatura"],
                     hide_index=True,
                     use_container_width=True,
@@ -1397,7 +1514,22 @@ with tab_nakliye:
                 st.markdown("---")
                 st.markdown("### 📋 İhale Bazlı Tam Tablo (Çekilen + Eksik Tüm Partiler)")
                 st.caption("Bir ihalede aldığımız partilerin hepsi burada — çekilmemiş olanlar da 'Eksik' etiketiyle görünür, sadece tamamlananları değil.")
-                st.dataframe(df_ihale_ozet, use_container_width=True)
+                # NOT: burada Drive/Excel'e giden df_ihale_ozet değil, sadece ekrandaki
+                # gösterimi düzgün sıralansın diye ayrı bir kopya (gorsel_ihale_ozet)
+                # sayı/tarih tipine çevriliyor — Drive/Excel'deki metin biçimi bozulmasın diye.
+                gorsel_ihale_ozet = siralanabilir_yap(
+                    df_ihale_ozet,
+                    sayi_kolonlari=["Parti No", "Miktar", "Kalan Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Nakliye Ücreti"],
+                    tarih_kolonlari=["İhale Tarihi", "Son Ödeme Tarihi"],
+                )
+                st.dataframe(
+                    gorsel_ihale_ozet,
+                    column_config=siralama_column_config(
+                        sayi_format_kolonlari={"Parti No": "%d", "Miktar": "%.3f", "Kalan Miktar": "%.3f", "Birim Fiyat": "%.2f", "Taksitli Tutar": "%.2f", "Nakit Tutar": "%.2f", "Nakliye Ücreti": "%.2f"},
+                        tarih_kolonlari=["İhale Tarihi", "Son Ödeme Tarihi"],
+                    ),
+                    use_container_width=True,
+                )
 
                 st.markdown("#### ☁️ Ana Drive Dosyasına Otomatik Aktarım")
                 st.caption("Bu tablo, 'Kereste_İhale_Sistemi' dosyasında 'Nakliye_Tümü' sekmesine ve her ihale (İşletme + İhale Tarihi) için kendi ayrı sekmesine otomatik olarak işleniyor — indirmene gerek yok, Drive'da hep güncel duruyor.")
