@@ -17,9 +17,53 @@ from email.mime.multipart import MIMEMultipart
 from collections import Counter
 import hashlib
 import uuid
+import sys
+import traceback
+from datetime import timezone, timedelta
 
 # SSL Uyarılarını Kapat
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Streamlit Cloud sunucusu UTC saatinde çalışıyor — datetime.now() Türkiye'de gece
+# 00:00-03:00 arası bir önceki günü veriyordu (gecikti işareti, not tarihleri kayıyordu).
+TR_TZ = timezone(timedelta(hours=3))
+
+def simdi():
+    return datetime.now(TR_TZ).replace(tzinfo=None)
+
+def bildir(mesaj, tur="success"):
+    """st.rerun() öncesi gösterilen st.success mesajı, sayfa yenilendiği için hiç görünmüyordu.
+    Mesajı session_state'e koyup sayfa yenilendikten sonra en üstte gösteriyoruz."""
+    st.session_state.setdefault("_bildirimler", []).append((tur, mesaj))
+
+def bildirimleri_goster():
+    for tur, mesaj in st.session_state.pop("_bildirimler", []):
+        getattr(st, tur)(mesaj)
+
+class guvenli_bolum:
+    """Bir sekmede beklenmeyen bir hata olursa (Google bağlantısı kopması, kota, bozuk veri vb.)
+    kırmızı teknik hata ekranı yerine anlaşılır bir mesaj gösterir; diğer sekmeler çalışmaya
+    devam eder. Teknik detay Streamlit Cloud loglarına (Manage app) yazılır.
+    NOT: st.rerun()/st.stop() BaseException olduğu için burada yakalanmaz, normal çalışır."""
+    def __init__(self, ad):
+        self.ad = ad
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None or not issubclass(exc_type, Exception):
+            return False
+        print(f"[HATA] {self.ad}:", file=sys.stderr)
+        traceback.print_exception(exc_type, exc, tb, file=sys.stderr)
+        metin = str(exc)
+        if "429" in metin or "Quota exceeded" in metin or "RATE_LIMIT" in metin:
+            st.warning("⏳ Google Sheets şu an çok yoğun (kısa süreli istek sınırı). 1 dakika bekleyip sayfayı yenileyin — girdiğiniz işlem kaydedilmediyse tekrar deneyin.")
+        elif isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+            st.warning("🌐 İnternet / sunucu bağlantısında geçici bir sorun oldu. Biraz sonra sayfayı yenileyip tekrar deneyin.")
+        else:
+            st.error(f"⚠️ '{self.ad}' bölümünde beklenmeyen bir sorun oluştu. Sayfayı yenileyip tekrar deneyin; devam ederse bu mesajı iletin.\n\nTeknik detay: `{type(exc).__name__}: {metin[:300]}`")
+        return True
 
 def tr_upper(text):
     """Python'un .upper() metodu Türkçe kurallarını bilmez: küçük 'i' harfini düz 'I' yapar,
@@ -136,13 +180,18 @@ def siralama_column_config(sayi_format_kolonlari=None, tarih_kolonlari=None):
         cfg[kol] = st.column_config.DateColumn(kol, format="DD.MM.YYYY")
     return cfg
 
+@st.cache_resource(show_spinner=False)
+def _drive_senkron_hafizasi():
+    """Sunucu genelinde (tüm kullanıcılar için ortak) sekme -> son yazılan içerik hash'i."""
+    return {}
+
 def nakliye_drive_senkronize(spreadsheet, df):
     """Nakliyesi tamamlanmış partileri ana Drive dosyasında 'Nakliye_Tümü' ve her
     İşletme + İhale Tarihi kombinasyonu için ayrı bir sekmede günceller — Excel indirmeye
-    gerek kalmadan Drive dosyası her zaman güncel dursun diye. Veri son senkronizasyondan
-    beri değişmediyse (session_state'teki hash aynıysa) tekrar Sheets'e yazmaz; aksi halde
-    her sayfa yenilemesinde (Streamlit her etkileşimde tüm sekmeleri yeniden çalıştırdığı
-    için) gereksiz API isteği atılıp kotaya takılma riski olurdu."""
+    gerek kalmadan Drive dosyası her zaman güncel dursun diye.
+    Sadece içeriği gerçekten değişen sekmeler yazılıyor ve hafıza tüm kullanıcılar için
+    ortak: eskiden her yeni ziyaretçide TÜM sekmeler baştan yazılıyordu (ihale başına
+    2-3 istek), bu da Google'ın dakikalık istek sınırını dolduruyordu."""
     if df.empty:
         return False
 
@@ -150,30 +199,45 @@ def nakliye_drive_senkronize(spreadsheet, df):
     if "Fatura" in yazilacak_df.columns:
         yazilacak_df["Fatura"] = yazilacak_df["Fatura"].map(lambda v: "EVET" if v else "")
 
-    veri_hash = hashlib.md5(yazilacak_df.to_csv(index=False).encode("utf-8")).hexdigest()
-    if st.session_state.get("_nakliye_drive_hash") == veri_hash:
-        return False
-
-    def _sekmeye_yaz(baslik, grup_df):
-        satirlar = [grup_df.columns.tolist()] + grup_df.astype(str).values.tolist()
-        try:
-            ws = spreadsheet.worksheet(baslik)
-            ws.clear()
-        except gspread.exceptions.WorksheetNotFound:
-            ws = spreadsheet.add_worksheet(title=baslik, rows=str(len(satirlar) + 5), cols=str(len(grup_df.columns) + 2))
-        ws.update(satirlar, value_input_option="USER_ENTERED")
-
-    _sekmeye_yaz("Nakliye_Tümü", yazilacak_df)
-
+    hedefler = {"Nakliye_Tümü": yazilacak_df}
     if "İşletme" in yazilacak_df.columns and "İhale Tarihi" in yazilacak_df.columns:
         for (isletme_adi, tarih), grup in yazilacak_df.groupby(["İşletme", "İhale Tarihi"]):
             sekme_adi = f"Nak_{isletme_adi}_{tarih}".strip() or "Bilinmeyen"
             for ch in ['\\', '/', '*', '[', ']', ':', '?']:
                 sekme_adi = sekme_adi.replace(ch, '-')
-            sekme_adi = sekme_adi[:40]
-            _sekmeye_yaz(sekme_adi, grup)
+            hedefler[sekme_adi[:40]] = grup
 
-    st.session_state["_nakliye_drive_hash"] = veri_hash
+    hafiza = _drive_senkron_hafizasi()
+    degisenler = {}
+    for baslik, grup_df in hedefler.items():
+        h = hashlib.md5(grup_df.to_csv(index=False).encode("utf-8")).hexdigest()
+        if hafiza.get(baslik) != h:
+            degisenler[baslik] = (grup_df, h)
+    if not degisenler:
+        return False
+
+    mevcut_sekmeler = {ws.title: ws for ws in spreadsheet.worksheets()}  # tek istek
+    yazilacaklar = []
+    for baslik, (grup_df, h) in degisenler.items():
+        satirlar = [grup_df.columns.tolist()] + grup_df.astype(str).values.tolist()
+        gereken_satir, gereken_sutun = len(satirlar) + 5, len(grup_df.columns) + 2
+        ws = mevcut_sekmeler.get(baslik)
+        if ws is None:
+            spreadsheet.add_worksheet(title=baslik, rows=str(gereken_satir), cols=str(gereken_sutun))
+        elif ws.row_count < len(satirlar) or ws.col_count < len(grup_df.columns):
+            ws.resize(rows=max(ws.row_count, gereken_satir), cols=max(ws.col_count, gereken_sutun))
+        yazilacaklar.append((baslik, satirlar))
+
+    # Tüm değişen sekmeler tek "temizle" + tek "yaz" isteğiyle güncelleniyor.
+    def _aralik(baslik):
+        return "'" + baslik.replace("'", "''") + "'"
+    spreadsheet.values_batch_clear(body={"ranges": [_aralik(b) for b, _ in yazilacaklar]})
+    spreadsheet.values_batch_update({
+        "valueInputOption": "USER_ENTERED",
+        "data": [{"range": _aralik(b) + "!A1", "values": satirlar} for b, satirlar in yazilacaklar],
+    })
+    for baslik, (_, h) in degisenler.items():
+        hafiza[baslik] = h
     return True
 
 def nakliyeci_cari_ekle(spreadsheet, nakliyeci_adi, kayitlar):
@@ -212,6 +276,19 @@ def nakliyeci_cari_ekle(spreadsheet, nakliyeci_adi, kayitlar):
 
     ws.append_rows(genisletilmis_kayitlar, value_input_option='USER_ENTERED')
     ws.append_row([""] * len(baslik))
+
+class OgmSayfaHatasi(Exception):
+    pass
+
+def ogm_link_duzelt(metin):
+    """Yapıştırılan metinden OGM ihale numarasını bulup sonuç sayfası linkini döndürür, bulamazsa None."""
+    t = str(metin or "").strip()
+    if not t:
+        return None
+    m = re.search(r'ihale/(\d+)', t) or re.fullmatch(r'(\d{3,})', t)
+    if not m:
+        return None
+    return f"https://esatis.ogm.gov.tr/ihale/{m.group(1)}/sonuc"
 
 st.set_page_config(page_title="Kereste İhale & Maliyet Sistemi", layout="wide")
 
@@ -276,6 +353,8 @@ def sheets_baglan():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 
     client = gspread.authorize(creds)
+    # Google cevap vermezse sayfa sonsuza kadar donmasın.
+    client.set_timeout(30)
     spreadsheet = client.open("Kereste_İhale_Sistemi")
     sheet = spreadsheet.sheet1
 
@@ -362,6 +441,12 @@ class OnbellekliSekme:
             satir.pop()
         return satir
 
+    def taze_satirlar(self):
+        """Önbelleği atlayıp Sheets'ten en güncel hali okur — yazmadan hemen önce, ekranda
+        görülen satırın bu arada (başka biri/elle düzenleme ile) değişip değişmediğini kontrol için."""
+        _sekme_oku.clear()
+        return self.get_all_values()
+
     def __getattr__(self, ad):
         deger = getattr(self._ws, ad)
         if ad in self._YAZMA_METOTLARI and callable(deger):
@@ -399,6 +484,26 @@ if not sheets_baglantisi:
         st.rerun()
     st.stop()
 
+def satirlar_degismedi_mi(taze_veri, gorulen_veri, satir_nolari):
+    """Yazmadan önce: ekranda görülen satırlar Sheets'teki güncel haliyle aynı mı?
+    Aradan biri satır silmiş/düzenlemişse ya da aynı partiyi başka biri işlemişse
+    yanlış satıra yazmamak için işlemi durdururuz."""
+    for n in satir_nolari:
+        if n - 1 >= len(taze_veri) or n - 1 >= len(gorulen_veri):
+            return False
+        a = [str(x).strip() for x in taze_veri[n - 1]]
+        b = [str(x).strip() for x in gorulen_veri[n - 1]]
+        uzunluk = max(len(a), len(b))
+        a += [""] * (uzunluk - len(a))
+        b += [""] * (uzunluk - len(b))
+        if a != b:
+            return False
+    return True
+
+TABLO_DEGISTI_MESAJI = "🔄 Bu kayıt siz ekrandayken değişmiş (başka biri işlem yapmış ya da tablo elle düzenlenmiş). Yanlış satıra yazılmasın diye işlem yapılmadı — sayfa yenilendi, lütfen kontrol edip tekrar deneyin."
+
+bildirimleri_goster()
+
 tab_islem, tab_gecmis, tab_odeme, tab_nakliye, tab_radar = st.tabs([
     "📥 Yeni İhale Çek",
     "📊 Geçmiş Alımlar",
@@ -408,12 +513,18 @@ tab_islem, tab_gecmis, tab_odeme, tab_nakliye, tab_radar = st.tabs([
 ])
 
 # --- İHALE ÇEKME SEKMESİ ---
-with tab_islem:
+with tab_islem, guvenli_bolum("Yeni İhale Çek"):
     st.subheader("📥 Yeni İhale Ekle / Çek")
-    islem_turu = st.radio("İşlem Türü Seçin:", ["🔗 OGM Sonuç Linkinden Toplu Çek (Bot)", "📄 İhale Öncesi PDF'den Hesapla"])
+    islem_turu = st.radio("İşlem Türü Seçin:", ["🔗 OGM Sonuç Linkinden Toplu Çek (Bot)", "📄 İhale Öncesi PDF'den Hesapla (yakında)"])
 
     if islem_turu == "🔗 OGM Sonuç Linkinden Toplu Çek (Bot)":
-        ihale_linki = st.text_input("OGM İhale Sonuç Linki", placeholder="Örn: https://esatis.ogm.gov.tr/ihale/207249/sonuc")
+        ihale_linki_ham = st.text_input("OGM İhale Sonuç Linki", placeholder="Örn: https://esatis.ogm.gov.tr/ihale/207249/sonuc")
+        # Yanlış/eksik yapıştırılan linkler (sonunda /sonuc yok, başında boşluk var, sadece
+        # ihale numarası girilmiş vb.) eskiden anlaşılmaz bir bağlantı hatası veriyordu.
+        # İhale numarasını yakalayıp her zaman doğru sonuç sayfası linkini kuruyoruz.
+        ihale_linki = ogm_link_duzelt(ihale_linki_ham)
+        if ihale_linki_ham.strip() and not ihale_linki:
+            st.warning("⚠️ Bu geçerli bir OGM ihale linki gibi görünmüyor. Link 'esatis.ogm.gov.tr/ihale/NUMARA/...' şeklinde olmalı (ya da sadece ihale numarasını yazabilirsiniz).")
 
         # --- LİNK YAPIŞTIRILINCA YER + KAYITLI MESAFE ÖNİZLEMESİ ---
         if ihale_linki:
@@ -502,19 +613,23 @@ with tab_islem:
                 st.write("")
                 st.write("")
                 if st.button("Kaydet", key="mesafe_kaydet_btn"):
-                    if yeni_yer:
+                    if not yeni_yer.strip():
+                        st.warning("Önce yer adını yazın.")
+                    elif yeni_km <= 0 and yeni_ucret <= 0:
+                        st.warning("KM veya nakliye ücretinden en az birini girin.")
+                    else:
                         mesafe_sheet.append_row([isletme_kisalt(yeni_yer), yeni_km, yeni_ucret])
-                        st.success("Kaydedildi!")
+                        bildir(f"✅ '{isletme_kisalt(yeni_yer)}' mesafe tablosuna kaydedildi.")
                         st.rerun()
 
         if st.button("Kazandıklarımızı Çek ve Kaydet", type="primary", use_container_width=True):
             if not ihale_linki:
-                st.warning("Lütfen OGM sonuç linkini yapıştırın.")
+                st.warning("Lütfen geçerli bir OGM sonuç linki yapıştırın.")
             else:
                 with st.spinner("Taktik devrede, OGM taranıyor... Lütfen bekleyin..."):
                     try:
                         # --- ANA VERİTABANI MÜKERRER KONTROLÜ (İŞLETME + PARTİ) ---
-                        mevcut_gecmis = sheet.get_all_values()
+                        mevcut_gecmis = sheet.taze_satirlar()
                         mevcut_gecmis_set = set()
                         if len(mevcut_gecmis) > 1:
                             for r in mevcut_gecmis[1:]:
@@ -548,6 +663,8 @@ with tab_islem:
 
                         headers = {'User-Agent': 'Mozilla/5.0'}
                         res = requests.get(ihale_linki, headers=headers, verify=False, timeout=20)
+                        if res.status_code != 200:
+                            raise OgmSayfaHatasi(res.status_code)
                         soup = BeautifulSoup(res.text, 'html.parser')
 
                         isletme_text = "Bilinmeyen İşletme"
@@ -591,13 +708,13 @@ with tab_islem:
                             try:
                                 millis = int(el.get('data-millis'))
                                 if millis > 1000000000000: 
-                                    genel_ihale_tarihi = datetime.fromtimestamp(millis / 1000.0).strftime('%d.%m.%Y')
+                                    genel_ihale_tarihi = datetime.fromtimestamp(millis / 1000.0, tz=TR_TZ).strftime('%d.%m.%Y')
                                     break 
                             except:
                                 continue
 
                         if genel_ihale_tarihi == "Tarih Bulunamadı":
-                            bugun_str = datetime.now().strftime("%d.%m.%Y")
+                            bugun_str = simdi().strftime("%d.%m.%Y")
                             tarih_match = re.search(r'(\d{2}\.\d{2}\.\d{4})\s*[Tt]arihli', soup.text)
                             if tarih_match:
                                 genel_ihale_tarihi = tarih_match.group(1)
@@ -838,21 +955,26 @@ with tab_islem:
                                 st.warning("⚠️ Şu partilerde fiyat veya miktar 0 olarak kaydedildi, sayfa/PDF ayrıştırması başarısız olmuş olabilir — lütfen Google Sheets'ten elle kontrol edin:\n\n" + "\n".join(f"- {p}" for p in supheli_partiler))
                         elif atlanan_adet > 0:
                             st.warning(f"Bu sayfadaki kazandığımız {atlanan_adet} partinin tümü zaten veritabanında var, o yüzden yeniden eklenmedi (Mükerrer koruması devrede).")
+                        elif not dogru_tablo:
+                            st.error("Bu sayfada ihale sonuç tablosu bulunamadı. İhale henüz sonuçlanmamış olabilir ya da link başka bir sayfaya ait — linki kontrol edip tekrar deneyin.")
                         else:
                             st.error("Sayfa tarandı ancak firmalarımızın kazandığı herhangi bir parti bulunamadı.")
+                    except OgmSayfaHatasi as e:
+                        st.error(f"🌐 OGM bu ihale sayfasını açmadı (kod {e.args[0]}). İhale numarası yanlış olabilir ya da OGM sitesinde geçici bir sorun var — linki kontrol edip biraz sonra tekrar deneyin.")
                     except requests.exceptions.Timeout:
                         st.error("⏱️ OGM sunucusu 20 saniye içinde cevap vermedi. Bu genelde OGM'nin sitesi yavaş çalıştığında ya da Streamlit Cloud'un sunucu adresini geçici olarak yavaşlattığında olur — bir kaç dakika sonra tekrar dene. Sürekli oluyorsa bana söyle, başka bir çözüm bulalım.")
                     except requests.exceptions.RequestException as e:
-                        st.error(f"🌐 OGM sunucusuna bağlanılamadı: {e}")
-                    except Exception as e:
-                        st.error(f"Bot çalışırken hata oluştu: {e}")
+                        print(f"[HATA] OGM bağlantısı: {e}", file=sys.stderr)
+                        st.error("🌐 OGM sunucusuna bağlanılamadı. İnternet bağlantısını ya da OGM sitesinin açık olup olmadığını kontrol edip biraz sonra tekrar deneyin.")
+                    # Diğer hatalar (Sheets kotası vb.) sekmenin genel güvenlik ağında anlaşılır mesajla gösteriliyor.
+                    # Bot tekrar çalıştırılırsa mükerrer koruması zaten kaydedilmiş partileri atlıyor.
 
     else:
-        st.info("PDF hesaplama modülü aktif.")
+        st.info("📄 İhale öncesi PDF'den hesaplama özelliği henüz hazır değil. Şimdilik ihale sonuçlandıktan sonra yukarıdaki 'OGM Sonuç Linkinden Toplu Çek' seçeneğini kullanın.")
 
 
 # --- GEÇMİŞ ALIMLAR ---
-with tab_gecmis:
+with tab_gecmis, guvenli_bolum("Geçmiş Alımlar"):
     st.subheader("📊 Buluttaki Geçmiş Alımlar")
     
     if sheets_baglantisi:
@@ -920,7 +1042,7 @@ with tab_gecmis:
                     _maliyet_goster = st.checkbox(
                         "💰 Gerçek Maliyet ve Nakliye Ücretini Göster",
                         value=False,
-                        help="Varsayılan olarak gizli — tek tıkla açılır/kapanır. CSV indirmede her zaman dahil edilir.",
+                        help="Varsayılan olarak gizli — tek tıkla açılır/kapanır. Excel indirmede her zaman dahil edilir.",
                     )
 
                     st.markdown("##### 🔍 Tabloyu Filtrele")
@@ -970,24 +1092,32 @@ with tab_gecmis:
                     with col1:
                         st.caption(f"Filtrelenmiş Sonuç: **{len(df_filtered)}** / Toplam: **{len(df)}** adet ihale gösteriliyor.")
                     with col2:
-                        _csv_df = df_filtered.copy()
-                        if "Tarih" in _csv_df.columns:
-                            _csv_df["Tarih"] = _csv_df["Tarih"].dt.strftime('%d.%m.%Y')
-                        csv = _csv_df.to_csv(index=False).encode('utf-8')
+                        # CSV yerine Excel: Türkçe Excel CSV'yi ';' ile ayırıyor ve UTF-8'i
+                        # tanımıyor — dosya tek sütunda, ş/ğ/İ harfleri bozuk açılıyordu.
+                        _indir_df = df_filtered.copy()
+                        if "Tarih" in _indir_df.columns:
+                            _indir_df["Tarih"] = _indir_df["Tarih"].dt.strftime('%d.%m.%Y')
+                        _gecmis_excel = io.BytesIO()
+                        with pd.ExcelWriter(_gecmis_excel, engine='openpyxl') as writer:
+                            _indir_df.to_excel(writer, sheet_name='Geçmiş Alımlar', index=False)
                         st.download_button(
-                            label="📥 Süzülmüş Tabloyu İndir (CSV)",
-                            data=csv,
-                            file_name='filtrelenmis_ihale_gecmisi.csv',
-                            mime='text/csv',
+                            label="📥 Süzülmüş Tabloyu İndir (Excel)",
+                            data=_gecmis_excel.getvalue(),
+                            file_name=f"ihale_gecmisi_{simdi().strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         )
                 else:
                     st.info("Henüz kaydedilmiş geçmiş bir ihale bulunmuyor.")
             except Exception as e:
-                st.error(f"Veriler çekilirken bir hata oluştu: {e}")
+                print(f"[HATA] Geçmiş Alımlar: {e}", file=sys.stderr)
+                if "429" in str(e) or "Quota exceeded" in str(e):
+                    st.warning("⏳ Google Sheets şu an çok yoğun. 1 dakika bekleyip sayfayı yenileyin.")
+                else:
+                    st.error(f"Geçmiş alımlar gösterilirken bir sorun oluştu. Sayfayı yenileyip tekrar deneyin; devam ederse bu mesajı iletin. (Teknik detay: {type(e).__name__}: {e})")
 
 
 # --- KASA VE ÖDEME TAKİP SEKMESİ ---
-with tab_odeme:
+with tab_odeme, guvenli_bolum("Kasa & Ödeme Takibi"):
     st.subheader("💳 Kasa ve Son Ödeme Tarihi Takibi")
 
     if sheets_baglantisi:
@@ -1075,7 +1205,7 @@ with tab_odeme:
                     if _gunluk_ozet.empty:
                         st.caption("Gösterilecek ödeme tarihi bulunamadı.")
                     else:
-                        _bugun_ts = pd.Timestamp(datetime.now().date())
+                        _bugun_ts = pd.Timestamp(simdi().date())
                         _gun_cols = st.columns(3)
                         for i, (gun, satir) in enumerate(_gunluk_ozet.iterrows()):
                             _gecikti_mi = gun < _bugun_ts
@@ -1096,7 +1226,7 @@ with tab_odeme:
 
                 # Son ödeme tarihi geçmiş ama hâlâ ödenmemiş partiler gözden kaçmasın diye
                 # "Durum" sütununda büyük harfle GECİKTİ yazılıyor ve satır kırmızıya boyanıyor.
-                bugun_ts = pd.Timestamp(datetime.now().date())
+                bugun_ts = pd.Timestamp(simdi().date())
                 df_bekleyen['_Gecikti'] = df_bekleyen['Tarih_Formatli'] < bugun_ts
 
                 gorsel_kolonlar_kasa = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Gerçek Birim Maliyet", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum"] if c in df_bekleyen.columns]
@@ -1149,6 +1279,9 @@ with tab_odeme:
                         not_col_num = headers.index("Not") + 1
 
                         with st.spinner("Ödeme Google Sheets'e işleniyor..."):
+                            if not satirlar_degismedi_mi(kasa_sheet.taze_satirlar(), kasa_data, [gercek_satir_no]):
+                                bildir(TABLO_DEGISTI_MESAJI, "warning")
+                                st.rerun()
                             # Tek seferde toplu yazma: iki ayrı update_cell çağrısı arasında bağlantı
                             # koparsa satır "Durum" güncellenip "Not" güncellenmemiş yarım kalabilirdi.
                             kasa_sheet.update_cells([
@@ -1156,7 +1289,7 @@ with tab_odeme:
                                 gspread.Cell(gercek_satir_no, not_col_num, islem_notu),
                             ], value_input_option='USER_ENTERED')
 
-                            st.success("✅ Ödeme başarıyla işlendi ve arşive aktarıldı!")
+                            bildir("✅ Ödeme başarıyla işlendi ve arşive aktarıldı!")
                             st.rerun()
             else:
                 st.success("🎉 Mükemmel! Şu an ödeme bekleyen hiçbir parti bulunmuyor. Kasa tertemiz!")
@@ -1238,9 +1371,12 @@ with tab_odeme:
                                     pass
                     # ----------------------------------------
 
+                    # Mükerrer kontrolü önbellekten değil Sheets'in en güncel halinden —
+                    # iki kişi aynı partileri arka arkaya yapıştırırsa çift kayıt oluşmasın.
+                    _kasa_taze = kasa_sheet.taze_satirlar()
                     mevcut_kayitlar = set()
-                    if len(kasa_data) > 1:
-                        for row in kasa_data[1:]:
+                    if len(_kasa_taze) > 1:
+                        for row in _kasa_taze[1:]:
                             if len(row) > 2:
                                 m_isletme = isletme_kisalt(row[0])
                                 m_tarih = str(row[1]).strip() if len(row) > 1 else ""
@@ -1330,7 +1466,7 @@ with tab_odeme:
                             
                     if yeni_kayitlar:
                         kasa_sheet.append_rows(yeni_kayitlar, value_input_option='USER_ENTERED')
-                        st.success(f"🎉 Harika! {eklenen_adet} adet parti ({firma_secimi}, İşletme+Parti No kontrolünden geçerek) Kasaya eklendi.")
+                        bildir(f"🎉 Harika! {eklenen_adet} adet parti ({firma_secimi}, İşletme+Parti No kontrolünden geçerek) Kasaya eklendi.")
                         st.rerun()
                     elif found_count == 0:
                         st.error("❌ Yapıştırılan metinde tanınabilir hiçbir parti satırı bulunamadı. OGM 'Parti Satış' ekranındaki tabloyu (başlıklar dahil) tam olarak kopyaladığınızdan emin olun.")
@@ -1343,7 +1479,7 @@ with tab_odeme:
 
 
 # --- NAKLİYE TAKİP SEKMESİ ---
-with tab_nakliye:
+with tab_nakliye, guvenli_bolum("Nakliye Takibi"):
     st.subheader("🚚 Nakliye Takibi")
     st.info("Ödemesi tamamlanmış partiler burada listelenir. Tamamı bir seferde çekildiyse toplu işaretle; sadece bir kısmı çekildiyse (örn. 80 m³'lük partiden 40 m³) kısmi çekim bölümünü kullan — kalan miktar otomatik takip edilir.")
 
@@ -1452,9 +1588,13 @@ with tab_nakliye:
                 if secilenler_nakliye:
                     girilen_miktarlar = {}
                     girilen_ucretler = {}
-                    for secim in secilenler_nakliye:
+                    for secim in list(secilenler_nakliye):
                         satir_no = int(secim.split("|")[0].replace("Satır", "").strip())
-                        satir_bilgi = df_bekleyen_nakliye[df_bekleyen_nakliye['SheetRow'] == satir_no].iloc[0]
+                        _eslesen = df_bekleyen_nakliye[df_bekleyen_nakliye['SheetRow'] == satir_no]
+                        if _eslesen.empty:
+                            secilenler_nakliye.remove(secim)
+                            continue
+                        satir_bilgi = _eslesen.iloc[0]
                         kalan = float(satir_bilgi['Kalan Miktar'])
                         col_miktar, col_ucret = st.columns(2)
                         with col_miktar:
@@ -1487,14 +1627,20 @@ with tab_nakliye:
                             st.error("Kasa_Takip sayfasında gerekli sütunlar bulunamadı. Kasa & Ödeme sekmesini bir kez açıp tekrar dene.")
                         elif all(m <= 0 for m in girilen_miktarlar.values()):
                             st.warning("En az bir parti için 0'dan büyük miktar gir.")
+                        elif not secilen_nakliyeci and nakliyeci_secim == YENI_NAKLIYECI_ETIKET:
+                            st.warning("Yeni nakliyecinin adını yazın.")
                         else:
                             with st.spinner("Nakliye bilgisi Google Sheets'e işleniyor..."):
+                                _secilen_satirlar = [int(x.split("|")[0].replace("Satır", "").strip()) for x in secilenler_nakliye]
+                                if not satirlar_degismedi_mi(kasa_sheet.taze_satirlar(), nakliye_kasa_data, _secilen_satirlar):
+                                    bildir(TABLO_DEGISTI_MESAJI, "warning")
+                                    st.rerun()
                                 nakliye_durum_col = nakliye_headers.index("Nakliye Durumu") + 1
                                 nakliye_not_col = nakliye_headers.index("Nakliye Notu") + 1
                                 cekilen_col = nakliye_headers.index("Çekilen Miktar") + 1
                                 ucret_col = nakliye_headers.index("Nakliye Ücreti") + 1 if "Nakliye Ücreti" in nakliye_headers else None
                                 nakliyeci_col = nakliye_headers.index("Nakliyeci") + 1 if "Nakliyeci" in nakliye_headers else None
-                                bugun_str = datetime.now().strftime("%d.%m.%Y")
+                                bugun_str = simdi().strftime("%d.%m.%Y")
                                 ozet = []
                                 yazilacak_hucreler = []
                                 cari_kayitlar = []
@@ -1549,7 +1695,7 @@ with tab_nakliye:
                                         nakliyeci_sheet.append_row([secilen_nakliyeci])
                                     nakliyeci_cari_ekle(spreadsheet, secilen_nakliyeci, cari_kayitlar)
 
-                                st.success("✅ Kaydedildi:\n\n" + "\n".join(f"- {o}" for o in ozet))
+                                bildir("✅ Kaydedildi:\n\n" + "\n".join(f"- {o}" for o in ozet))
                                 st.rerun()
             else:
                 st.success("🎉 Depoda bekleyen (ödemesi yapılmış ama henüz çekilmemiş) parti yok!")
@@ -1578,26 +1724,36 @@ with tab_nakliye:
                 )
                 _arsiv_column_config["Fatura"] = st.column_config.CheckboxColumn("📄 Fatura Geldi mi?", help="Muhasebeci fatura geldiğinde burayı tikleyip geçecek.")
 
+                # Anahtar tablonun içeriğine bağlı: veri değişince (yeni parti arşive düşünce)
+                # tablo sıfırdan çiziliyor. Sabit anahtarda, önceki bir tik "3. satır" diye
+                # hatırlanıp satırlar kaydığında BAŞKA bir partinin faturasına yazılabiliyordu.
+                _fatura_editor_key = "fatura_editor_" + hashlib.md5(
+                    df_nakliye_tamam[["SheetRow"] + arsiv_kolonlar].to_csv(index=False).encode("utf-8")
+                ).hexdigest()[:12]
                 duzenlenen_arsiv = st.data_editor(
                     gorsel_arsiv,
                     column_config=_arsiv_column_config,
                     disabled=[c for c in arsiv_kolonlar if c != "Fatura"],
                     hide_index=True,
                     use_container_width=True,
-                    key="fatura_editor",
+                    key=_fatura_editor_key,
                 )
 
                 if "Fatura" in nakliye_headers:
                     fatura_col = nakliye_headers.index("Fatura") + 1
-                    degisiklik_oldu = False
+                    fatura_hucreleri = []
                     for i in range(len(gorsel_arsiv)):
                         eski_deger = gorsel_arsiv.iloc[i]['Fatura']
                         yeni_deger = duzenlenen_arsiv.iloc[i]['Fatura']
                         if bool(eski_deger) != bool(yeni_deger):
                             satir_no = int(df_nakliye_tamam.iloc[i]['SheetRow'])
-                            kasa_sheet.update_cell(satir_no, fatura_col, "EVET" if yeni_deger else "")
-                            degisiklik_oldu = True
-                    if degisiklik_oldu:
+                            fatura_hucreleri.append(gspread.Cell(satir_no, fatura_col, "EVET" if yeni_deger else ""))
+                    if fatura_hucreleri:
+                        if satirlar_degismedi_mi(kasa_sheet.taze_satirlar(), nakliye_kasa_data, [c.row for c in fatura_hucreleri]):
+                            kasa_sheet.update_cells(fatura_hucreleri, value_input_option='USER_ENTERED')
+                            bildir("✅ Fatura durumu kaydedildi.")
+                        else:
+                            bildir(TABLO_DEGISTI_MESAJI, "warning")
                         st.rerun()
                 else:
                     st.caption("⚠️ 'Fatura' sütunu henüz sayfada yok — Kasa & Ödeme sekmesini bir kez açıp tekrar dene, otomatik eklenecek.")
@@ -1652,12 +1808,19 @@ with tab_nakliye:
 
                 st.markdown("#### ☁️ Ana Drive Dosyasına Otomatik Aktarım")
                 st.caption("Bu tablo, 'Kereste_İhale_Sistemi' dosyasında 'Nakliye_Tümü' sekmesine ve her ihale (İşletme + İhale Tarihi) için kendi ayrı sekmesine otomatik olarak işleniyor — indirmene gerek yok, Drive'da hep güncel duruyor.")
-                with st.spinner("Drive'daki sekmeler kontrol ediliyor..."):
-                    _senkron_oldu = nakliye_drive_senkronize(spreadsheet, df_ihale_ozet)
-                if _senkron_oldu:
-                    st.success("✅ Drive'daki 'Nakliye_Tümü' ve ihale bazlı sekmeler güncellendi.")
-                else:
-                    st.caption("☁️ Drive sekmeleri zaten güncel.")
+                try:
+                    with st.spinner("Drive'daki sekmeler kontrol ediliyor..."):
+                        _senkron_oldu = nakliye_drive_senkronize(spreadsheet, df_ihale_ozet)
+                    if _senkron_oldu:
+                        st.success("✅ Drive'daki 'Nakliye_Tümü' ve ihale bazlı sekmeler güncellendi.")
+                    else:
+                        st.caption("☁️ Drive sekmeleri zaten güncel.")
+                except Exception as e:
+                    # Drive aktarımı yan işlem — başarısız olursa sayfanın geri kalanı etkilenmesin,
+                    # bir sonraki açılışta (değişen sekmeler hafızada işaretlenmediği için) tekrar denenir.
+                    print(f"[HATA] Drive senkronizasyonu: {e}", file=sys.stderr)
+                    traceback.print_exc(file=sys.stderr)
+                    st.caption("☁️ Drive sekmeleri şu an güncellenemedi (Google geçici olarak yoğun). Birazdan otomatik tekrar denenecek — aşağıdaki Excel indirme her zaman çalışır.")
 
                 # --- İŞLETME + İHALE TARİHİ KOMBİNASYONUNA GÖRE AYRI SEKMELİ EXCEL İNDİRME (opsiyonel, ekstra) ---
                 # Aynı yer (Örn. ALADAĞ) farklı tarihlerde birden fazla ihale olabilir; bunları
@@ -1683,7 +1846,7 @@ with tab_nakliye:
                 st.download_button(
                     "📥 Nakliye Arşivini Excel Olarak İndir (Her İhale Ayrı Sekmede)",
                     data=excel_buffer.getvalue(),
-                    file_name=f"nakliye_arsiv_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    file_name=f"nakliye_arsiv_{simdi().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
         else:
@@ -1691,7 +1854,7 @@ with tab_nakliye:
 
 
 # --- RADAR VE BİLDİRİM BÖLÜMÜ ---
-with tab_radar:
+with tab_radar, guvenli_bolum("İhale Radarı"):
     st.subheader("🎯 Bölge Radarı & Mail Testi (PDF + RÖNTGEN Modu)")
 
     if sheets_baglantisi:
@@ -1702,9 +1865,16 @@ with tab_radar:
         with col_ekle:
             yeni_isletme = st.text_input("Bölge Ekle", placeholder="Örn: ZONGULDAK VEYA MENGEN")
             if st.button("Listeye Ekle"):
-                if yeni_isletme and yeni_isletme.upper() not in [x.upper() for x in mevcut_liste]:
-                    takip_sheet.append_row([yeni_isletme.upper()])
-                    st.success("Eklendi!")
+                # tr_upper: Python'un .upper()'ı "bilecik"i "BILECIK" (noktasız I) yapıyordu,
+                # OGM'deki "BİLECİK" ile hiç eşleşmediği için radar o bölgeyi sessizce kaçırıyordu.
+                _yeni = tr_upper(yeni_isletme.strip())
+                if not _yeni:
+                    st.warning("Önce bölge adını yazın.")
+                elif _yeni in [tr_upper(x.strip()) for x in mevcut_liste]:
+                    st.info(f"'{_yeni}' zaten takip listesinde.")
+                else:
+                    takip_sheet.append_row([_yeni])
+                    bildir(f"✅ '{_yeni}' takip listesine eklendi.")
                     st.rerun()
 
         if mevcut_liste:
@@ -1734,7 +1904,7 @@ with tab_radar:
                     st.warning("Önce yukarıdan takip edilecek işletme eklemelisin!")
                 else:
                     st.markdown("### 🛠️ BOT RÖNTGEN RAPORU")
-                    bugun = datetime.now().strftime("%d.%m.%Y")
+                    bugun = simdi().strftime("%d.%m.%Y")
                     st.info(f"📅 BOT'UN BİLDİĞİ 'BUGÜN' TARİHİ: {bugun}")
                     bulunan_ihaleler = []
 
@@ -1791,8 +1961,7 @@ with tab_radar:
                                     with st.expander(f"🔬 '{eslesen_bolge}' satırının ham HTML'i"):
                                         st.code(str(tr), language="html")
 
-                                    from datetime import timezone, timedelta as _timedelta
-                                    tr_tz = timezone(_timedelta(hours=3))
+                                    tr_tz = TR_TZ
 
                                     def _millis_to_saat(td_class):
                                         td = tr.find('td', class_=td_class)

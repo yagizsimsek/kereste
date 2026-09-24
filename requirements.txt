@@ -1,8 +1,8 @@
-streamlit
-pdfplumber
-pandas
-gspread
-oauth2client
-requests
-beautifulsoup4
-openpyxl	
+streamlit>=1.37,<2
+pdfplumber>=0.11,<1
+pandas>=2.2,<3
+gspread>=6.1,<7
+oauth2client>=4.1,<5
+requests>=2.32,<3
+beautifulsoup4>=4.12,<5
+openpyxl>=3.1,<4

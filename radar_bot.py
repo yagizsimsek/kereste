@@ -36,7 +36,9 @@ def main():
             
         client = gspread.authorize(creds)
         takip_sheet = client.open("Kereste_İhale_Sistemi").worksheet("Takip_Listesi")
-        mevcut_liste = [x.strip().upper() for x in takip_sheet.col_values(1)[1:] if x.strip()]
+        # Türkçe büyük harf: 'i' -> 'İ' (Python'un .upper()'ı noktasız 'I' yapıp OGM'deki
+        # "BİLECİK" gibi adlarla eşleşmeyi bozuyordu).
+        mevcut_liste = [x.strip().replace('i', 'İ').upper() for x in takip_sheet.col_values(1)[1:] if x.strip()]
         log(f"👀 Takip edilen bölgeler: {', '.join(mevcut_liste)}")
     except Exception as e:
         log(f"❌ Google Sheets hatası: {e}")
@@ -91,7 +93,7 @@ def main():
             onceki_sayfa_imzasi = sayfa_imzasi
 
             for tr in tum_satirlar:
-                satir_metni = tr.get_text(separator=' ', strip=True).upper()
+                satir_metni = tr.get_text(separator=' ', strip=True).replace('i', 'İ').upper()
                 if not satir_metni:
                     continue
 
