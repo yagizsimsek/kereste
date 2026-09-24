@@ -177,6 +177,17 @@ def siralanabilir_yap(df, sayi_kolonlari=None, tarih_kolonlari=None):
             df[kol] = pd.to_datetime(df[kol], format='%d.%m.%Y', errors='coerce')
     return df
 
+def yeniden_eskiye(df, tarih_kolonu):
+    """Tabloyu en yeni tarih en üstte olacak şekilde sıralar. Aynı tarihli satırlarda
+    Sheets'e sonradan eklenen (daha yeni kayıt) üstte kalır. Tarihi okunamayanlar en alta."""
+    ters = df.iloc[::-1]
+    if df.empty or tarih_kolonu not in df.columns:
+        return ters
+    tarih = df[tarih_kolonu]
+    if not pd.api.types.is_datetime64_any_dtype(tarih):
+        tarih = pd.to_datetime(tarih.astype(str).str.strip(), format='%d.%m.%Y', errors='coerce')
+    return ters.assign(_SiraTarih=tarih).sort_values("_SiraTarih", ascending=False, kind="stable", na_position="last").drop(columns="_SiraTarih")
+
 def siralama_column_config(sayi_format_kolonlari=None, tarih_kolonlari=None):
     """sayi_format_kolonlari: {'Kolon Adı': '%.2f'} gibi bir sözlük. Değerler
     gerçek sayı/tarih tipine çevrildikten sonra bu, görünümü eskisi gibi
@@ -875,6 +886,7 @@ def _sekme_gecmis():
                         # dokunmadan sadece ekrandan/filtreden/Excel'den kaldırıyoruz.
                         df = df.drop(columns=[c for c in ["Mesafe (KM)", "Nakliye Ücreti (TL/m³)"] if c in df.columns])
 
+                        df = yeniden_eskiye(df, "Tarih").reset_index(drop=True)
                         df_filtered = df.copy()
 
                         st.markdown("##### 🔍 Tabloyu Filtrele")
@@ -1119,7 +1131,7 @@ def _sekme_odeme():
                             firma_etiket = f" [{row['Alan Firma']}]" if row.get('Alan Firma') else ""
                             secenekler.append(f"Satır {row['SheetRow']} | {row['İşletme']}{firma_etiket} - Parti No: {row['Parti No']} - Taksitli: {row['Taksitli Tutar']} ₺ - Nakit: {row['Nakit Tutar']} ₺")
 
-                        secilen_islem = st.selectbox("Ödemesi Yapılan Partiyi Seç", secenekler)
+                        secilen_islemler = st.multiselect("Ödemesi Yapılan Parti(ler)i Seç — birden fazla seçilebilir", secenekler, placeholder="Parti seçin...", key="odeme_multiselect")
 
                     with col_not:
                         islem_notu = st.text_input("Satış / Ödeme Notu Ekle", placeholder="Örn: Ziraat Kartından Nakit İndirimli Çekildi")
@@ -1128,23 +1140,27 @@ def _sekme_odeme():
                         st.write("")
                         st.write("")
                         if st.button("💳 Ödendi Olarak İşaretle", type="primary", use_container_width=True):
-                            gercek_satir_no = int(secilen_islem.split("|")[0].replace("Satır", "").strip())
-                            durum_col_num = headers.index("Durum") + 1
-                            not_col_num = headers.index("Not") + 1
+                            if not secilen_islemler:
+                                st.warning("Önce en az bir parti seçin.")
+                            else:
+                                gercek_satir_nolari = [int(x.split("|")[0].replace("Satır", "").strip()) for x in secilen_islemler]
+                                durum_col_num = headers.index("Durum") + 1
+                                not_col_num = headers.index("Not") + 1
 
-                            with st.spinner("Ödeme Google Sheets'e işleniyor..."):
-                                if not satirlar_degismedi_mi(kasa_sheet.taze_satirlar(), kasa_data, [gercek_satir_no]):
-                                    bildir(TABLO_DEGISTI_MESAJI, "warning")
+                                with st.spinner("Ödeme Google Sheets'e işleniyor..."):
+                                    if not satirlar_degismedi_mi(kasa_sheet.taze_satirlar(), kasa_data, gercek_satir_nolari):
+                                        bildir(TABLO_DEGISTI_MESAJI, "warning")
+                                        st.rerun()
+                                    # Seçilen tüm partiler TEK istekte yazılıyor — yarıda bağlantı koparsa
+                                    # bazıları ödendi bazıları ödenmedi diye yarım kalmasın.
+                                    _odeme_hucreleri = []
+                                    for _satir_no in gercek_satir_nolari:
+                                        _odeme_hucreleri.append(gspread.Cell(_satir_no, durum_col_num, "ÖDENDİ"))
+                                        _odeme_hucreleri.append(gspread.Cell(_satir_no, not_col_num, islem_notu))
+                                    kasa_sheet.update_cells(_odeme_hucreleri, value_input_option='USER_ENTERED')
+
+                                    bildir(f"✅ {len(gercek_satir_nolari)} partinin ödemesi işlendi ve arşive aktarıldı!")
                                     st.rerun()
-                                # Tek seferde toplu yazma: iki ayrı update_cell çağrısı arasında bağlantı
-                                # koparsa satır "Durum" güncellenip "Not" güncellenmemiş yarım kalabilirdi.
-                                kasa_sheet.update_cells([
-                                    gspread.Cell(gercek_satir_no, durum_col_num, "ÖDENDİ"),
-                                    gspread.Cell(gercek_satir_no, not_col_num, islem_notu),
-                                ], value_input_option='USER_ENTERED')
-
-                                bildir("✅ Ödeme başarıyla işlendi ve arşive aktarıldı!")
-                                st.rerun()
                 else:
                     st.success("🎉 Mükemmel! Şu an ödeme bekleyen hiçbir parti bulunmuyor. Kasa tertemiz!")
 
@@ -1153,7 +1169,7 @@ def _sekme_odeme():
 
                 df_odenen = df_kasa[df_kasa['_DurumTemiz'] == "ÖDENDİ"].copy()
                 if not df_odenen.empty:
-                    df_odenen = df_odenen.reset_index(drop=True)
+                    df_odenen = yeniden_eskiye(df_odenen, "İhale Tarihi").reset_index(drop=True)
                     # OGM'nin satış faturası geldi mi? (Nakliye sekmesindeki "Fatura" nakliyecinin
                     # faturası — bu ayrı bir sütun: "OGM Fatura".)
                     if "OGM Fatura" in df_odenen.columns:
@@ -1437,7 +1453,7 @@ def _sekme_nakliye():
 
                 if not df_bekleyen_nakliye.empty:
                     df_bekleyen_nakliye['Tarih_Formatli'] = pd.to_datetime(df_bekleyen_nakliye['Son Ödeme Tarihi'], format='%d.%m.%Y', errors='coerce')
-                    df_bekleyen_nakliye = df_bekleyen_nakliye.sort_values(by='Tarih_Formatli', ascending=True).drop(columns=['Tarih_Formatli'])
+                    df_bekleyen_nakliye = yeniden_eskiye(df_bekleyen_nakliye.drop(columns=['Tarih_Formatli']), "İhale Tarihi")
 
                     gorsel_kolonlar = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Kalan Miktar", "Nakliye Durumu", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi"] if c in df_bekleyen_nakliye.columns]
                     gorsel_df_nakliye_bekleyen = siralanabilir_yap(
@@ -1583,7 +1599,7 @@ def _sekme_nakliye():
                 st.markdown("### 🚛 Nakliyesi Tamamlanmış (Arşiv) Partiler")
                 df_nakliye_tamam = df_odemesi_biten[df_odemesi_biten['_NakliyeTemiz'] == "NAKLİYE YAPILDI"].copy()
                 if not df_nakliye_tamam.empty:
-                    df_nakliye_tamam = df_nakliye_tamam.reset_index(drop=True)
+                    df_nakliye_tamam = yeniden_eskiye(df_nakliye_tamam, "İhale Tarihi").reset_index(drop=True)
                     if "Fatura" in df_nakliye_tamam.columns:
                         df_nakliye_tamam['Fatura'] = df_nakliye_tamam["Fatura"].astype(str).str.strip().apply(tr_upper) == "EVET"
                     else:
@@ -1645,7 +1661,7 @@ def _sekme_nakliye():
                 # tabloyu göstermek için ödemesi yapılmış HER partiyi (çekilsin ya da çekilmesin)
                 # durum etiketiyle birlikte ayrı bir tabloda tutuyoruz.
                 if not df_odemesi_biten.empty:
-                    df_ihale_ozet = df_odemesi_biten.copy().reset_index(drop=True)
+                    df_ihale_ozet = yeniden_eskiye(df_odemesi_biten, "İhale Tarihi").reset_index(drop=True)
 
                     def _nakliye_durumu_ozetle(v):
                         v = tr_upper(str(v).strip())
