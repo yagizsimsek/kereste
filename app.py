@@ -729,7 +729,7 @@ def _sekme_islem():
                                                         miktar_float = float(_miktar_span["data-value"])
                                                     except (ValueError, TypeError):
                                                         miktar_float = 0.0
-                                                tablo_adet = 0
+                                                tablo_adet = 0  # (şu an kullanılmıyor; tahmini kutur hesabı kapatıldı)
                                                 _adet_metni = re.sub(r'\D', '', cols[3].get_text(strip=True)) if len(cols) > 3 else ""
                                                 if _adet_metni:
                                                     tablo_adet = int(_adet_metni)
@@ -848,19 +848,10 @@ def _sekme_islem():
                                                         if pdf_isim and os.path.exists(pdf_isim):
                                                             os.remove(pdf_isim)
 
-                                                # Kutur PDF'ten okunamadıysa miktar + adet + boydan tahmini hesap (silindir formülü).
+                                                # Kutur PDF'ten okunamadıysa TAHMİN YAPILMIYOR (kullanıcı isteği: gerçek
+                                                # olmayan veri yazılmasın) — 0 kaydedilip açıkça uyarılıyor, elle düzeltilecek.
                                                 if hesaplanan_kutur == 0.0:
-                                                    _adet_hesap = t_adet or tablo_adet
-                                                    try:
-                                                        _h_boy = float(str(hesaplanan_boy).replace(',', '.'))
-                                                    except ValueError:
-                                                        _h_boy = 0.0
-                                                    if _adet_hesap > 0 and miktar_float > 0 and _h_boy > 0:
-                                                        import math
-                                                        hesaplanan_kutur = round(math.sqrt((miktar_float * 40000) / (math.pi * _h_boy * _adet_hesap)), 2)
-                                                        parti_notlari.append(f"kutur PDF'ten okunamadığı için miktar/adet/boydan tahmini hesaplandı ({hesaplanan_kutur:g} cm)")
-                                                    else:
-                                                        parti_notlari.append("kutur hesaplanamadı, 0 kaydedildi")
+                                                    parti_notlari.append("KUTUR okunamadı, 0 kaydedildi — Google Sheets'te elle girin")
 
                                                 if miktar_float == 0.0:
                                                     parti_notlari.append("MİKTAR okunamadı, 0 kaydedildi")
