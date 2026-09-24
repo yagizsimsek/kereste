@@ -21,7 +21,14 @@ RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL")
 def log(msg):
     print(msg, flush=True)
 
+# Radar geçici olarak kapalı: GitHub Actions her sabah yine çalıştırır ama hiçbir şey
+# taramaz ve mail göndermez. Tekrar açmak için True yap.
+RADAR_AKTIF = False
+
 def main():
+    if not RADAR_AKTIF:
+        log("🔕 Radar geçici olarak kapalı (RADAR_AKTIF = False) — tarama ve mail yok.")
+        return
     log("🚀 OGM Sabah Radarı Başlıyor...")
     bugun = datetime.now().strftime("%d.%m.%Y")
     
