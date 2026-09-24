@@ -296,6 +296,18 @@ def nakliyeci_cari_ekle(spreadsheet, nakliyeci_adi, kayitlar):
     ws.append_rows(genisletilmis_kayitlar, value_input_option='USER_ENTERED')
     ws.append_row([""] * len(baslik))
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def ogm_erisilebilir():
+    """OGM sitesi Türkiye dışındaki IP'leri tamamen engelliyor (test edildi: 12 ülkeden
+    zaman aşımı, İstanbul'dan 0,2 sn). Streamlit Cloud ABD'de olduğu için orada link çekme
+    hiç çalışmıyor; kullanıcıyı 20 sn bekletip hata vermek yerine baştan söylüyoruz.
+    Site Türkiye'deki bir bilgisayarda (Yağız'ın Mac'i) çalışınca True döner."""
+    try:
+        requests.get("https://esatis.ogm.gov.tr/", headers={'User-Agent': 'Mozilla/5.0'}, verify=False, timeout=6)
+        return True
+    except Exception:
+        return False
+
 class OgmSayfaHatasi(Exception):
     pass
 
@@ -491,7 +503,16 @@ def _sekme_islem():
         st.subheader("📥 Yeni İhale Ekle / Çek")
         islem_turu = st.radio("İşlem Türü Seçin:", ["🔗 OGM Sonuç Linkinden Toplu Çek (Bot)", "📄 İhale Öncesi PDF'den Hesapla (yakında)"])
 
-        if islem_turu == "🔗 OGM Sonuç Linkinden Toplu Çek (Bot)":
+        if islem_turu == "🔗 OGM Sonuç Linkinden Toplu Çek (Bot)" and not ogm_erisilebilir():
+            st.warning(
+                "🇹🇷 **Link ile ihale çekme bu sunucuda çalışmıyor.** OGM sitesi Türkiye dışından gelen "
+                "bağlantıları engelliyor, bu internet sitesinin sunucusu ise yurtdışında.\n\n"
+                "İhale çekmek için siteyi **Yağız'ın bilgisayarından** açın: kereste klasöründeki "
+                "**'Siteyi Bilgisayarda Aç'** dosyasına çift tıklayın. Oradan çekilen ihaleler aynı "
+                "Google Sheets'e yazılır ve buradaki sitede de görünür (en geç 5 dakika içinde ya da "
+                "sağ üstteki '🔄 Verileri Yenile' ile hemen)."
+            )
+        elif islem_turu == "🔗 OGM Sonuç Linkinden Toplu Çek (Bot)":
             ihale_linki_ham = st.text_area(
                 "OGM İhale Sonuç Linki — birden fazla ihale için linklerin arasına boşluk bırakın (ya da alt alta yapıştırın)",
                 placeholder="Örn: https://esatis.ogm.gov.tr/ihale/207249/sonuc https://esatis.ogm.gov.tr/ihale/207250/sonuc",
