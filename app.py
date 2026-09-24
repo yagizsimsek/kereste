@@ -98,7 +98,7 @@ def sayi_parse(v):
     """'42,707' ya da '1.234,56' gibi Türkçe ondalıklı bir metni float'a çevirir, boş/bozuksa 0.0 döner.
     NOT: pandas boş hücreleri None/NaN'a çevirebiliyor — 'nan' metni float('nan') ile SESSİZCE
     geçerli bir sayıya (NaN) dönüştüğü için bunu en başta ayrıca eleyip 0.0 döndürüyoruz, yoksa
-    NaN toplamlara sessizce karışıp (Örn. 'Gerçek Maliyet' hesapları) tüm sonucu NaN yapabiliyordu."""
+    NaN toplamlara sessizce karışıp (Örn. tutar toplamları) tüm sonucu NaN yapabiliyordu."""
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return 0.0
     s = str(v).strip()
@@ -300,50 +300,6 @@ def ogm_link_duzelt(metin):
 
 st.set_page_config(page_title="Kereste İhale & Maliyet Sistemi", layout="wide")
 
-# --- OPENROUTESERVICE (OTOMATİK KM HESAPLAMA) ---
-try:
-    ORS_API_KEY = st.secrets["ORS_API_KEY"]
-except Exception:
-    ORS_API_KEY = None
-
-ORS_BASLANGIC_NOKTASI = "Sakarya, Türkiye"
-
-def ors_km_hesapla(hedef_yer):
-    """OpenRouteService ile Sakarya'dan hedef yere sürüş mesafesini (km) hesaplar.
-    API anahtarı yoksa veya herhangi bir adımda hata olursa sessizce None döner
-    (çağıran taraf bu durumda manuel girişe / mesafe tablosuna düşer)."""
-    if not ORS_API_KEY or not hedef_yer or hedef_yer == "Bilinmeyen İşletme":
-        return None
-    try:
-        def geokodla(yer_adi):
-            r = requests.get(
-                "https://api.openrouteservice.org/geocode/search",
-                params={"api_key": ORS_API_KEY, "text": yer_adi, "size": 1, "boundary.country": "TR"},
-                timeout=10,
-            )
-            r.raise_for_status()
-            data = r.json()
-            return data["features"][0]["geometry"]["coordinates"]  # [lon, lat]
-
-        baslangic = geokodla(ORS_BASLANGIC_NOKTASI)
-        hedef = geokodla(f"{hedef_yer}, Türkiye")
-
-        r = requests.get(
-            "https://api.openrouteservice.org/v2/directions/driving-car",
-            params={
-                "api_key": ORS_API_KEY,
-                "start": f"{baslangic[0]},{baslangic[1]}",
-                "end": f"{hedef[0]},{hedef[1]}",
-            },
-            timeout=15,
-        )
-        r.raise_for_status()
-        data = r.json()
-        mesafe_metre = data["features"][0]["properties"]["segments"][0]["distance"]
-        return round(mesafe_metre / 1000.0, 1)
-    except Exception:
-        return None
-
 # --- GOOGLE SHEETS BAĞLANTISI ---
 # Streamlit her tıklamada (filtre, checkbox vs.) tüm dosyayı baştan çalıştırıyor.
 # Eskiden her seferinde bağlantı + tüm sekmeler yeniden okunuyordu (~15-20 okuma),
@@ -379,39 +335,15 @@ def sheets_baglan():
         kasa_sheet.append_row(["İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not", "Nakliye Durumu", "Nakliye Notu", "Alan Firma", "Çekilen Miktar", "Fatura", "Nakliye Ücreti", "Nakliyeci", "OGM Fatura"])
 
     try:
-        mesafe_sheet = spreadsheet.worksheet("Mesafe_Tablosu")
-    except:
-        mesafe_sheet = spreadsheet.add_worksheet(title="Mesafe_Tablosu", rows="100", cols="3")
-        mesafe_sheet.append_row(["Yer", "KM", "Nakliye Ücreti (TL/m³)"])
-
-    # Mesafe_Tablosu eskiden 2 sütundu (Yer, KM) — üçüncü sütunu (Nakliye Ücreti)
-    # burada ekliyoruz ki eski kurulumlar da otomatik güncellensin.
-    if mesafe_sheet.col_count < 3:
-        mesafe_sheet.add_cols(3 - mesafe_sheet.col_count)
-    _mesafe_baslik = mesafe_sheet.row_values(1)
-    if len(_mesafe_baslik) < 3 or _mesafe_baslik[2] != "Nakliye Ücreti (TL/m³)":
-        mesafe_sheet.update_cell(1, 3, "Nakliye Ücreti (TL/m³)")
-
-    try:
         nakliyeci_sheet = spreadsheet.worksheet("Nakliyeciler")
     except:
         nakliyeci_sheet = spreadsheet.add_worksheet(title="Nakliyeciler", rows="100", cols="1")
         nakliyeci_sheet.append_row(["Nakliyeci Adı"])
 
-    # Sayfa1 (ana ihale kaydı) eskiden 10 sütundu, sona "Nakliye Ücreti" ekliyoruz —
-    # bot her yeni parti eklerken bu ücreti o anki tabloya göre "donduracak" (snapshot),
-    # yani tablo daha sonra değişse bile eski partiler eski ücretle kalacak.
-    _sayfa1_baslik = sheet.row_values(1)
-    if len(_sayfa1_baslik) < 11 or (len(_sayfa1_baslik) >= 11 and _sayfa1_baslik[10] != "Nakliye Ücreti (TL/m³)"):
-        if sheet.col_count < 11:
-            sheet.add_cols(11 - sheet.col_count)
-        sheet.update_cell(1, 11, "Nakliye Ücreti (TL/m³)")
-
     return spreadsheet, {
         "sheet": sheet,
         "takip": takip_sheet,
         "kasa": kasa_sheet,
-        "mesafe": mesafe_sheet,
         "nakliyeci": nakliyeci_sheet,
     }
 
@@ -484,7 +416,6 @@ try:
     sheet = OnbellekliSekme("sheet", _sekmeler["sheet"])
     takip_sheet = OnbellekliSekme("takip", _sekmeler["takip"])
     kasa_sheet = OnbellekliSekme("kasa", _sekmeler["kasa"])
-    mesafe_sheet = OnbellekliSekme("mesafe", _sekmeler["mesafe"])
     nakliyeci_sheet = OnbellekliSekme("nakliyeci", _sekmeler["nakliyeci"])
     # İlk okumayı burada yap ki kota hatası olursa sayfanın ortasında değil, en üstte yakalansın.
     _tum_sekmeleri_oku()
@@ -572,25 +503,9 @@ def _sekme_islem():
             if len(linkler) > 1:
                 st.caption(f"🔗 {len(linkler)} ihale linki algılandı — hepsi sırayla çekilecek.")
 
-            # --- LİNK YAPIŞTIRILINCA YER + KAYITLI MESAFE ÖNİZLEMESİ ---
+            # --- LİNK YAPIŞTIRILINCA TESPİT EDİLEN YER ÖNİZLEMESİ ---
             if linkler:
                 _onizleme_hafiza = st.session_state.setdefault("_onizleme_hafiza", {})
-                _onizleme_mesafe_verileri = mesafe_sheet.get_all_values()
-                _onizleme_mesafe_sozlugu = {}
-                _onizleme_ucret_sozlugu = {}
-                for mv in _onizleme_mesafe_verileri[1:]:
-                    if len(mv) > 1 and str(mv[0]).strip():
-                        try:
-                            _onizleme_mesafe_sozlugu[isletme_kisalt(mv[0])] = float(str(mv[1]).replace(',', '.'))
-                        except (ValueError, TypeError):
-                            pass
-                    if len(mv) > 2 and str(mv[0]).strip() and str(mv[2]).strip():
-                        try:
-                            _onizleme_ucret_sozlugu[isletme_kisalt(mv[0])] = float(str(mv[2]).replace(',', '.'))
-                        except (ValueError, TypeError):
-                            pass
-
-                _eksik_yerler = []
                 for _link_no, ihale_linki in enumerate(linkler, 1):
                     if ihale_linki not in _onizleme_hafiza:
                         onizleme_yer = None
@@ -610,80 +525,12 @@ def _sekme_islem():
 
                     _on_ek = f"**{_link_no}.** " if len(linkler) > 1 else ""
                     if onizleme_yer:
-                        _km_var = onizleme_yer in _onizleme_mesafe_sozlugu
-                        _ucret_var = onizleme_yer in _onizleme_ucret_sozlugu
-                        if _km_var:
-                            _km_metni = f"mesafe kayıtlı: **{_onizleme_mesafe_sozlugu[onizleme_yer]:g} km**"
-                        elif ORS_API_KEY:
-                            _km_metni = "mesafe kayıtlı değil, otomatik hesaplanacak"
-                        else:
-                            _km_metni = "mesafe kayıtlı değil — KM girin"
-                        _ucret_metni = f"nakliye ücreti kayıtlı: **{_onizleme_ucret_sozlugu[onizleme_yer]:g} TL/m³**" if _ucret_var else "nakliye ücreti kayıtlı değil — girin"
-                        st.caption(f"{_on_ek}📍 **{onizleme_yer}** — {_km_metni} · 🚚 {_ucret_metni}")
-                        if (not _km_var and not ORS_API_KEY) or not _ucret_var:
-                            if onizleme_yer not in [y for y, _, _ in _eksik_yerler]:
-                                _eksik_yerler.append((onizleme_yer, not _km_var and not ORS_API_KEY, not _ucret_var))
+                        st.caption(f"{_on_ek}📍 Tespit edilen yer: **{onizleme_yer}**")
                     elif onizleme_hata == "timeout":
                         st.caption(f"{_on_ek}⏱️ OGM sunucusu 15 saniye içinde cevap vermedi (site yavaş olabilir). 'Kazandıklarımızı Çek ve Kaydet' yine de denenebilir, o 20 saniye bekliyor.")
                     else:
                         st.caption(f"{_on_ek}⚠️ Linkten yer bilgisi tespit edilemedi (link hatalı olabilir ya da ihale henüz sonuçlanmamış).")
-
-                # Çoklu linkte eksik bilgiler her yer için AYRI soruluyor — tek bir genel
-                # KM kutusu farklı yerlere yanlışlıkla aynı mesafeyi yazdırırdı.
-                if len(linkler) > 1 and _eksik_yerler:
-                    st.markdown("**Tabloda bilgisi eksik yerler** (girilmezse 0 kaydedilir):")
-                    for _yer, _km_eksik, _ucret_eksik in _eksik_yerler:
-                        _c1, _c2, _c3 = st.columns([1, 1, 1])
-                        _c1.markdown(f"📍 **{_yer}**")
-                        if _km_eksik:
-                            _c2.number_input(f"{_yer} — KM", min_value=0.0, step=1.0, key=f"coklu_km_{_yer}")
-                        if _ucret_eksik:
-                            _c3.number_input(f"{_yer} — nakliye ücreti (TL/m³)", min_value=0.0, step=50.0, key=f"coklu_ucret_{_yer}")
             # -------------------------------------------------------------
-
-            km_mesafe = 0.0
-            ucret_manuel = 0.0
-            if len(linkler) <= 1:
-                col_km_girisi, col_ucret_girisi = st.columns(2)
-                with col_km_girisi:
-                    km_mesafe = st.number_input("Bu İhalenin Depoya Mesafesi (KM) — mesafe otomatik hesaplanamazsa bu alan kullanılır", min_value=0.0, step=1.0)
-                with col_ucret_girisi:
-                    ucret_manuel = st.number_input("Bu İhalenin m³ Başına Nakliye Ücreti (TL) — tabloda yoksa bu alan kullanılır", min_value=0.0, step=50.0)
-            mesafe_hatirla = st.checkbox("📌 Girdiğim KM ve nakliye ücretini bu yer için hatırla (bir daha sorulmasın)", value=True)
-
-            with st.expander("📍 Mesafe ve Nakliye Ücreti Tablosunu Görüntüle / Elle Ekle"):
-                mesafe_goster = mesafe_sheet.get_all_values()
-                if len(mesafe_goster) > 1:
-                    _mesafe_df_goster = siralanabilir_yap(
-                        pd.DataFrame(mesafe_goster[1:], columns=mesafe_goster[0]),
-                        sayi_kolonlari=["KM", "Nakliye Ücreti (TL/m³)"],
-                    )
-                    st.dataframe(
-                        _mesafe_df_goster,
-                        column_config=siralama_column_config(sayi_format_kolonlari={"KM": "%.0f", "Nakliye Ücreti (TL/m³)": "%.0f"}),
-                        use_container_width=True,
-                    )
-                else:
-                    st.caption("Henüz kayıtlı mesafe yok.")
-                col_yer, col_km, col_ucret, col_ekle = st.columns([2, 1, 1, 1])
-                with col_yer:
-                    yeni_yer = st.text_input("Yer", placeholder="Örn: MENGEN", key="mesafe_yeni_yer")
-                with col_km:
-                    yeni_km = st.number_input("KM", min_value=0.0, step=1.0, key="mesafe_yeni_km")
-                with col_ucret:
-                    yeni_ucret = st.number_input("Nakliye Ücreti (TL/m³)", min_value=0.0, step=50.0, key="mesafe_yeni_ucret")
-                with col_ekle:
-                    st.write("")
-                    st.write("")
-                    if st.button("Kaydet", key="mesafe_kaydet_btn"):
-                        if not yeni_yer.strip():
-                            st.warning("Önce yer adını yazın.")
-                        elif yeni_km <= 0 and yeni_ucret <= 0:
-                            st.warning("KM veya nakliye ücretinden en az birini girin.")
-                        else:
-                            mesafe_sheet.append_row([isletme_kisalt(yeni_yer), yeni_km, yeni_ucret])
-                            bildir(f"✅ '{isletme_kisalt(yeni_yer)}' mesafe tablosuna kaydedildi.")
-                            st.rerun()
 
             if st.button("Kazandıklarımızı Çek ve Kaydet", type="primary", use_container_width=True):
                 if not linkler:
@@ -705,30 +552,9 @@ def _sekme_islem():
                                     # "zaten kayıtlı" sayılıp atlanırdı.
                                     mevcut_gecmis_set.add(f"{m_isl}_{m_tarih}_{m_prt}")
 
-                        # --- MESAFE TABLOSU (yer -> km, otomatik hatırlama) ---
-                        mesafe_verileri = mesafe_sheet.get_all_values()
-                        mesafe_sozlugu = {}
-                        ucret_sozlugu = {}
-                        if len(mesafe_verileri) > 1:
-                            for mv in mesafe_verileri[1:]:
-                                if len(mv) > 1 and str(mv[0]).strip():
-                                    try:
-                                        mesafe_sozlugu[isletme_kisalt(mv[0])] = float(str(mv[1]).replace(',', '.'))
-                                    except (ValueError, TypeError):
-                                        pass
-                                if len(mv) > 2 and str(mv[0]).strip() and str(mv[2]).strip():
-                                    try:
-                                        ucret_sozlugu[isletme_kisalt(mv[0])] = float(str(mv[2]).replace(',', '.'))
-                                    except (ValueError, TypeError):
-                                        pass
-                        # --------------------------------------------------------
                         for _link_no, ihale_linki in enumerate(linkler, 1):
                             if len(linkler) > 1:
                                 st.markdown(f"---\n**🔗 {_link_no}/{len(linkler)}. ihale:** {ihale_linki}")
-                            # Manuel KM/ücret: tek linkte üstteki genel kutular, çoklu linkte her yer için
-                            # önizlemede açılan ayrı kutular kullanılıyor (farklı yerlere aynı KM yazılmasın diye).
-                            _manuel_km = km_mesafe if len(linkler) == 1 else None
-                            _manuel_ucret = ucret_manuel if len(linkler) == 1 else None
                             try:
                                 headers = {'User-Agent': 'Mozilla/5.0'}
                                 res = requests.get(ihale_linki, headers=headers, verify=False, timeout=20)
@@ -740,39 +566,6 @@ def _sekme_islem():
                                 isletme_match = re.search(r'([A-ZÇĞİÖŞÜ\s]+(?:OİM|OBM))', soup.text)
                                 if isletme_match:
                                     isletme_text = isletme_kisalt(isletme_match.group(1))
-
-                                if _manuel_km is None:
-                                    _manuel_km = float(st.session_state.get(f"coklu_km_{isletme_text}", 0.0) or 0.0)
-                                if _manuel_ucret is None:
-                                    _manuel_ucret = float(st.session_state.get(f"coklu_ucret_{isletme_text}", 0.0) or 0.0)
-
-                                if isletme_text in mesafe_sozlugu:
-                                    kullanilacak_km = mesafe_sozlugu[isletme_text]
-                                    mesafe_kaynagi = "tablo"
-                                else:
-                                    ors_sonuc = ors_km_hesapla(isletme_text)
-                                    if ors_sonuc is not None:
-                                        kullanilacak_km = ors_sonuc
-                                        mesafe_kaynagi = "ors"
-                                    elif _manuel_km > 0:
-                                        kullanilacak_km = _manuel_km
-                                        mesafe_kaynagi = "manuel"
-                                    else:
-                                        kullanilacak_km = 0
-                                        mesafe_kaynagi = "eksik"
-
-                                # Nakliye ücreti de KM gibi tablodan "donmuş" bir değer olarak
-                                # çekiliyor — tablo daha sonra güncellense bile bu partinin
-                                # kaydına o anki ücret yazılıyor, geçmiş partiler etkilenmiyor.
-                                if isletme_text in ucret_sozlugu:
-                                    kullanilacak_ucret = ucret_sozlugu[isletme_text]
-                                    ucret_kaynagi = "tablo"
-                                elif _manuel_ucret > 0:
-                                    kullanilacak_ucret = _manuel_ucret
-                                    ucret_kaynagi = "manuel"
-                                else:
-                                    kullanilacak_ucret = 0
-                                    ucret_kaynagi = "eksik"
 
                                 # --- CLAUDE TAKTİĞİ (DATA-MILLIS OKUMA) KESİN ÇÖZÜMÜ ---
                                 genel_ihale_tarihi = "Tarih Bulunamadı"
@@ -987,7 +780,7 @@ def _sekme_islem():
                                                         if pdf_isim and os.path.exists(pdf_isim):
                                                             os.remove(pdf_isim)
 
-                                                yeni_satir = [satir_ihale_tarihi, isletme_text, alan_firma, str(parti_no), cins, str(hesaplanan_boy), float(round(miktar_float, 3)), float(round(hesaplanan_kutur, 2)), int(kullanilacak_km), int(fiyat_int), int(kullanilacak_ucret)]
+                                                yeni_satir = [satir_ihale_tarihi, isletme_text, alan_firma, str(parti_no), cins, str(hesaplanan_boy), float(round(miktar_float, 3)), float(round(hesaplanan_kutur, 2)), "", int(fiyat_int), ""]  # Mesafe ve Nakliye Ücreti sütunları artık kullanılmıyor, boş bırakılıyor (sütun sırası kaymasın diye)
                                                 eklenecek_satirlar.append(yeni_satir)
                                                 mevcut_gecmis_set.add(kayit_id_bot)
                                                 if fiyat_int == 0 or miktar_float == 0.0:
@@ -996,37 +789,6 @@ def _sekme_islem():
                                 if len(eklenecek_satirlar) > 0:
                                     sheet.append_rows(eklenecek_satirlar, value_input_option='USER_ENTERED')
                                     st.success(f"🎉 Helal olsun! {len(eklenecek_satirlar)} adet yeni ihale işlendi! (Zaten kayıtlı olan {atlanan_adet} parti atlandı).")
-
-                                    if mesafe_kaynagi == "tablo":
-                                        st.info(f"📍 '{isletme_text}' için mesafe tablodan otomatik alındı: {kullanilacak_km:g} km.")
-                                    elif mesafe_kaynagi == "ors":
-                                        st.info(f"🌍 '{isletme_text}' için sürüş mesafesi otomatik hesaplandı: {kullanilacak_km:g} km (OpenRouteService).")
-                                    elif mesafe_kaynagi == "manuel":
-                                        st.info(f"📍 '{isletme_text}' → {kullanilacak_km:g} km olarak kaydedilecek.")
-                                    elif mesafe_kaynagi == "eksik":
-                                        st.warning(f"⚠️ '{isletme_text}' için otomatik mesafe hesaplanamadı ve KM girilmedi, mesafe 0 olarak kaydedildi. Yukarıdaki 'Mesafe Tablosunu Görüntüle / Elle Ekle' kısmından bu yer için KM ekleyebilirsin.")
-
-                                    if ucret_kaynagi == "tablo":
-                                        st.info(f"🚚 '{isletme_text}' için nakliye ücreti tablodan otomatik alındı: {kullanilacak_ucret:g} TL/m³.")
-                                    elif ucret_kaynagi == "manuel":
-                                        st.info(f"🚚 '{isletme_text}' → {kullanilacak_ucret:g} TL/m³ nakliye ücreti olarak kaydedilecek.")
-                                    elif ucret_kaynagi == "eksik":
-                                        st.warning(f"⚠️ '{isletme_text}' için nakliye ücreti girilmedi, 0 olarak kaydedildi. Yukarıdaki tablodan bu yer için ücret ekleyebilirsin.")
-
-                                    # Mesafe/ücret tablosuna yeni bir bilgi öğrenildiyse (ORS her zaman,
-                                    # manuel girişler sadece "hatırla" işaretliyse) TEK satırda güncel
-                                    # haliyle kaydediliyor — km ve ücret ayrı ayrı satırlara bölünmüyor.
-                                    _yeni_bilgi_ogenildi = (
-                                        mesafe_kaynagi == "ors"
-                                        or (mesafe_hatirla and mesafe_kaynagi == "manuel")
-                                        or (mesafe_hatirla and ucret_kaynagi == "manuel")
-                                    )
-                                    if _yeni_bilgi_ogenildi:
-                                        mesafe_sheet.append_row([isletme_text, kullanilacak_km, kullanilacak_ucret])
-                                        # Aynı yerden ikinci bir link varsa tekrar sorulmasın/kaydedilmesin.
-                                        mesafe_sozlugu[isletme_text] = kullanilacak_km
-                                        ucret_sozlugu[isletme_text] = kullanilacak_ucret
-                                        st.info(f"💾 '{isletme_text}' için mesafe/ücret bilgisi tabloya kaydedildi, bir daha sorulmayacak.")
 
                                     if supheli_partiler:
                                         st.warning("⚠️ Şu partilerde fiyat veya miktar 0 olarak kaydedildi, sayfa/PDF ayrıştırması başarısız olmuş olabilir — lütfen Google Sheets'ten elle kontrol edin:\n\n" + "\n".join(f"- {p}" for p in supheli_partiler))
@@ -1109,26 +871,11 @@ def _sekme_gecmis():
                         if "Tarih" in df.columns:
                             df["Tarih"] = pd.to_datetime(df["Tarih"], format='%d.%m.%Y', errors='coerce')
 
-                        # Gerçek Maliyet = m³ Teklifimiz + Nakliye Ücreti — ihalede ucuz görünen
-                        # bir m³ fiyatı, nakliyesi pahalıysa gerçekte daha maliyetli olabiliyor;
-                        # bu yüzden ana kalem olarak teklif fiyatının hemen yanına ekliyoruz.
-                        if "m³ Teklifimiz (TL)" in df.columns:
-                            _teklif_sayi = df["m³ Teklifimiz (TL)"].apply(sayi_parse)
-                            _ucret_sayi = df["Nakliye Ücreti (TL/m³)"].apply(sayi_parse) if "Nakliye Ücreti (TL/m³)" in df.columns else 0.0
-                            df["Gerçek Maliyet (TL/m³)"] = (_teklif_sayi + _ucret_sayi).round(2)
-                            _kolon_sirasi = list(df.columns)
-                            _kolon_sirasi.remove("Gerçek Maliyet (TL/m³)")
-                            _teklif_konumu = _kolon_sirasi.index("m³ Teklifimiz (TL)") + 1
-                            _kolon_sirasi.insert(_teklif_konumu, "Gerçek Maliyet (TL/m³)")
-                            df = df[_kolon_sirasi]
+                        # Mesafe ve nakliye ücreti artık kullanılmıyor — Sheets'teki eski veriye
+                        # dokunmadan sadece ekrandan/filtreden/Excel'den kaldırıyoruz.
+                        df = df.drop(columns=[c for c in ["Mesafe (KM)", "Nakliye Ücreti (TL/m³)"] if c in df.columns])
 
                         df_filtered = df.copy()
-
-                        _maliyet_goster = st.checkbox(
-                            "💰 Gerçek Maliyet ve Nakliye Ücretini Göster",
-                            value=False,
-                            help="Varsayılan olarak gizli — tek tıkla açılır/kapanır. Excel indirmede her zaman dahil edilir.",
-                        )
 
                         st.markdown("##### 🔍 Tabloyu Filtrele")
                         with st.expander("Filtreleri Göster / Gizle", expanded=False):
@@ -1151,7 +898,11 @@ def _sekme_gecmis():
                             num_columns = 3
                             filter_cols = st.columns(num_columns)
 
-                            for i, col_name in enumerate([c for c in df.columns if not pd.api.types.is_datetime64_any_dtype(df[c])]):
+                            # Parti No / Toplam m³ / Ort. Kutur gibi her satırda farklı olan sayılarla
+                            # filtrelemek anlamsız — bunlar tabloda duruyor ama filtre kutusu yok.
+                            _filtresiz = {"Parti No", "Toplam m³", "Ort. Kutur (cm)"}
+                            _filtre_kolonlari = [c for c in df.columns if c not in _filtresiz and not pd.api.types.is_datetime64_any_dtype(df[c])]
+                            for i, col_name in enumerate(_filtre_kolonlari):
 
                                 unique_values = df[col_name].dropna().unique().tolist()
                                 try: unique_values.sort()
@@ -1167,13 +918,8 @@ def _sekme_gecmis():
                                 if selected_values:
                                     df_filtered = df_filtered[df_filtered[col_name].isin(selected_values)]
 
-                        _gosterilecek_df = df_filtered
-                        if not _maliyet_goster:
-                            _gizli_kolonlar = [c for c in ["Gerçek Maliyet (TL/m³)", "Nakliye Ücreti (TL/m³)"] if c in _gosterilecek_df.columns]
-                            _gosterilecek_df = _gosterilecek_df.drop(columns=_gizli_kolonlar)
-
                         st.dataframe(
-                            _gosterilecek_df,
+                            df_filtered,
                             column_config=siralama_column_config(tarih_kolonlari=["Tarih"]),
                             use_container_width=True,
                         )
@@ -1265,17 +1011,7 @@ def _sekme_odeme():
 
                 df_bekleyen = df_kasa[df_kasa['_DurumTemiz'] != "ÖDENDİ"].copy()
 
-                # Gerçek Birim Maliyet = Birim Fiyat + Nakliye Ücreti — ihalede ucuz görünen bir
-                # birim fiyat, nakliyesi pahalıysa gerçekte daha maliyetli olabiliyor (Örn. 7000 + 1000 = 8000).
-                # NOT: boş bir DataFrame üzerinde .apply() pandas'ta object-dtype boş bir Series
-                # döndürüp toplama/yuvarlamada TypeError'a yol açabiliyor — bu yüzden her yerde
-                # "not df_bekleyen.empty" ile koruyoruz (Kasa tamamen temizken bu sekme çöküyordu).
-                if not df_bekleyen.empty and "Birim Fiyat" in df_bekleyen.columns:
-                    _birim_sayi = df_bekleyen["Birim Fiyat"].apply(sayi_parse)
-                    _ucret_sayi_kasa = df_bekleyen["Nakliye Ücreti"].apply(sayi_parse) if "Nakliye Ücreti" in df_bekleyen.columns else 0.0
-                    df_bekleyen["Gerçek Birim Maliyet"] = (_birim_sayi + _ucret_sayi_kasa).round(2)
-
-                with st.expander("📊 Bekleyen Satışların Özeti (Tutar + Gerçek Maliyet)"):
+                with st.expander("📊 Bekleyen Satışların Özeti"):
                     _odeme_tutar = 0.0
                     if not df_bekleyen.empty:
                         for _c in ["Taksitli Tutar", "Nakit Tutar"]:
@@ -1347,7 +1083,7 @@ def _sekme_odeme():
                     bugun_ts = pd.Timestamp(simdi().date())
                     df_bekleyen['_Gecikti'] = df_bekleyen['Tarih_Formatli'] < bugun_ts
 
-                    gorsel_kolonlar_kasa = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Gerçek Birim Maliyet", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum"] if c in df_bekleyen.columns]
+                    gorsel_kolonlar_kasa = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum"] if c in df_bekleyen.columns]
                     gorsel_df_kasa = df_bekleyen[gorsel_kolonlar_kasa].copy()
                     gorsel_df_kasa = siralanabilir_yap(
                         gorsel_df_kasa,
@@ -1509,20 +1245,6 @@ def _sekme_odeme():
                                         parti_boy_sozlugu[f"{i_val_kisa}_{p_val}"] = b_val
                         # ----------------------------------------
 
-                        # --- NAKLİYE ÜCRETİ ANLIK SNAPSHOT (Mesafe_Tablosu'ndan) ---
-                        # KM'de olduğu gibi: bu parti kasaya eklendiği anki ücret buraya
-                        # "donduruluyor" — tablo daha sonra değişse bile bu satır etkilenmez.
-                        _kasa_mesafe_verileri = mesafe_sheet.get_all_values()
-                        kasa_ucret_sozlugu = {}
-                        if len(_kasa_mesafe_verileri) > 1:
-                            for mv in _kasa_mesafe_verileri[1:]:
-                                if len(mv) > 2 and str(mv[0]).strip() and str(mv[2]).strip():
-                                    try:
-                                        kasa_ucret_sozlugu[isletme_kisalt(mv[0])] = float(str(mv[2]).replace(',', '.'))
-                                    except (ValueError, TypeError):
-                                        pass
-                        # ----------------------------------------
-
                         # Mükerrer kontrolü önbellekten değil Sheets'in en güncel halinden —
                         # iki kişi aynı partileri arka arkaya yapıştırırsa çift kayıt oluşmasın.
                         _kasa_taze = kasa_sheet.taze_satirlar()
@@ -1604,11 +1326,8 @@ def _sekme_odeme():
                                 
                                 kayit_id = f"{isletme}_{ihale_tarihi}_{parti_no}"
 
-                                # Nakliye ücreti: o anki tablo değeri "donduruluyor" (KM'de olduğu gibi).
-                                bulunan_ucret = kasa_ucret_sozlugu.get(isletme_kisa, 0)
-
                                 if kayit_id not in mevcut_kayitlar:
-                                    yeni_kayitlar.append([isletme, ihale_tarihi, parti_no, cinsi, bulunan_boy, miktar, birim_fiyat, taksitli_tutar, nakit_tutar, son_tarih, "BEKLİYOR", "", "", "", bulunan_firma, "", "", bulunan_ucret, ""])
+                                    yeni_kayitlar.append([isletme, ihale_tarihi, parti_no, cinsi, bulunan_boy, miktar, birim_fiyat, taksitli_tutar, nakit_tutar, son_tarih, "BEKLİYOR", "", "", "", bulunan_firma, "", "", "", ""])
                                     mevcut_kayitlar.add(kayit_id)
                                     eklenen_adet += 1
                             except Exception as e:
@@ -1764,12 +1483,12 @@ def _sekme_nakliye():
                                     key=f"nakliye_miktar_{satir_no}",
                                 )
                             with col_ucret:
-                                varsayilan_ucret = sayi_parse(satir_bilgi.get("Nakliye Ücreti", 0))
+                                varsayilan_ucret = 0.0
                                 girilen_ucretler[satir_no] = st.number_input(
                                     f"{satir_bilgi['İşletme']} - Parti {satir_bilgi['Parti No']} — m³ başına nakliye ücreti (TL)",
                                     min_value=0.0, value=varsayilan_ucret, step=50.0,
                                     key=f"nakliye_ucret_{satir_no}",
-                                    help="Önceden mesafe tablosundan alınan tahmini ücret — gerçek fatura farklıysa burada düzelt.",
+                                    help="Nakliyecinin bu parti için m³ başına aldığı ücret — nakliyeci carisindeki 'Toplam Nakliye' bununla hesaplanır.",
                                 )
 
                         nakliyeci_secenekler = nakliyeci_sheet.col_values(1)[1:] if sheets_baglantisi else []
