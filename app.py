@@ -260,8 +260,15 @@ def ors_km_hesapla(hedef_yer):
         return None
 
 # --- GOOGLE SHEETS BAĞLANTISI ---
+# Streamlit her tıklamada (filtre, checkbox vs.) tüm dosyayı baştan çalıştırıyor.
+# Eskiden her seferinde bağlantı + tüm sekmeler yeniden okunuyordu (~15-20 okuma),
+# bu da Google'ın dakikalık okuma sınırını (429 Quota exceeded) aşıyordu.
+# Artık bağlantı bir kez kuruluyor, okumalar da kısa süre önbellekte tutuluyor;
+# herhangi bir yazma işleminden sonra önbellek temizleniyor ki veri hep güncel kalsın.
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-try:
+
+@st.cache_resource(show_spinner=False)
+def sheets_baglan():
     if os.path.exists("credentials.json"):
         creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
     else:
@@ -313,6 +320,69 @@ try:
             sheet.add_cols(11 - sheet.col_count)
         sheet.update_cell(1, 11, "Nakliye Ücreti (TL/m³)")
 
+    return spreadsheet, {
+        "sheet": sheet,
+        "takip": takip_sheet,
+        "kasa": kasa_sheet,
+        "mesafe": mesafe_sheet,
+        "nakliyeci": nakliyeci_sheet,
+    }
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _sekme_oku(anahtar):
+    return sheets_baglan()[1][anahtar].get_all_values()
+
+class OnbellekliSekme:
+    """Worksheet sarmalayıcı: okumalar önbellekten gelir, yazma olunca önbellek temizlenir."""
+    _YAZMA_METOTLARI = {
+        "append_row", "append_rows", "update_cell", "update_cells", "update",
+        "batch_update", "delete_rows", "insert_row", "insert_rows", "clear",
+        "add_cols", "add_rows", "resize", "format",
+    }
+
+    def __init__(self, anahtar, ws):
+        self._anahtar = anahtar
+        self._ws = ws
+
+    def get_all_values(self):
+        return [list(r) for r in _sekme_oku(self._anahtar)]
+
+    def col_values(self, n):
+        degerler = [r[n - 1] if len(r) >= n else "" for r in _sekme_oku(self._anahtar)]
+        while degerler and degerler[-1] == "":
+            degerler.pop()
+        return degerler
+
+    def row_values(self, n):
+        satirlar = _sekme_oku(self._anahtar)
+        if n > len(satirlar):
+            return []
+        satir = list(satirlar[n - 1])
+        while satir and satir[-1] == "":
+            satir.pop()
+        return satir
+
+    def __getattr__(self, ad):
+        deger = getattr(self._ws, ad)
+        if ad in self._YAZMA_METOTLARI and callable(deger):
+            def _yaz_ve_temizle(*args, **kwargs):
+                try:
+                    return deger(*args, **kwargs)
+                finally:
+                    _sekme_oku.clear()
+            return _yaz_ve_temizle
+        return deger
+
+try:
+    spreadsheet, _sekmeler = sheets_baglan()
+    sheet = OnbellekliSekme("sheet", _sekmeler["sheet"])
+    takip_sheet = OnbellekliSekme("takip", _sekmeler["takip"])
+    kasa_sheet = OnbellekliSekme("kasa", _sekmeler["kasa"])
+    mesafe_sheet = OnbellekliSekme("mesafe", _sekmeler["mesafe"])
+    nakliyeci_sheet = OnbellekliSekme("nakliyeci", _sekmeler["nakliyeci"])
+    # İlk okumayı burada yap ki kota hatası olursa sayfanın ortasında değil, en üstte yakalansın.
+    for _s in (sheet, takip_sheet, kasa_sheet, mesafe_sheet, nakliyeci_sheet):
+        _s.get_all_values()
     sheets_baglantisi = True
 except Exception as e:
     sheets_baglantisi = False
@@ -321,7 +391,13 @@ except Exception as e:
 st.title("🌲 Kereste İhale & Maliyet Takip Sistemi")
 
 if not sheets_baglantisi:
-    st.error(f"Google Sheets'e bağlanılamadı! Hata: {hata_mesaji}")
+    if "429" in str(hata_mesaji) or "Quota exceeded" in str(hata_mesaji):
+        st.error("Google Sheets kısa süreliğine çok fazla istek aldı. 1 dakika bekleyip sayfayı yenileyin.")
+    else:
+        st.error(f"Google Sheets'e bağlanılamadı! Hata: {hata_mesaji}")
+    if st.button("🔄 Tekrar Dene"):
+        st.rerun()
+    st.stop()
 
 tab_islem, tab_gecmis, tab_odeme, tab_nakliye, tab_radar = st.tabs([
     "📥 Yeni İhale Çek",
