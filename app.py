@@ -485,12 +485,13 @@ TABLO_DEGISTI_MESAJI = "🔄 Bu kayıt siz ekrandayken değişmiş (başka biri 
 
 bildirimleri_goster()
 
-tab_islem, tab_gecmis, tab_odeme, tab_nakliye, tab_radar = st.tabs([
-    "📥 Yeni İhale Çek",
+# Site açılınca ilk (varsayılan) sekme Geçmiş Alımlar; Yeni İhale Çek en sağda.
+tab_gecmis, tab_odeme, tab_nakliye, tab_radar, tab_islem = st.tabs([
     "📊 Geçmiş Alımlar",
     "💳 Kasa & Ödeme Takibi",
     "🚚 Nakliye Takibi",
-    "🔔 İhale Radarı"
+    "🔔 İhale Radarı",
+    "📥 Yeni İhale Çek",
 ])
 
 # --- İHALE ÇEKME SEKMESİ ---
