@@ -48,6 +48,16 @@ def bildirimleri_goster():
     for tur, mesaj in st.session_state.pop("_bildirimler", []):
         st.toast(mesaj.lstrip("✅🎉🔄⚠️ "), icon=_BILDIRIM_IKONLARI.get(tur, "ℹ️"))
 
+def kalici_bildir(sekme, mesaj, tur="warning"):
+    """Sayfa yenilendikten sonra ilgili sekmenin EN ÜSTÜNDE kutu olarak gösterilecek uyarı.
+    Köşedeki kısa bildirim (toast) birkaç saniyede kayboluyor; kontrol edilmesi gereken
+    sorunlar (eksik boy, okunamayan tutar vb.) gözden kaçmasın diye burada kalıyor."""
+    st.session_state.setdefault("_sekme_uyarilari", {}).setdefault(sekme, []).append((tur, mesaj))
+
+def kalici_bildirimleri_goster(sekme):
+    for tur, mesaj in st.session_state.get("_sekme_uyarilari", {}).pop(sekme, []):
+        getattr(st, tur)(mesaj)
+
 class guvenli_bolum:
     """Bir sekmede beklenmeyen bir hata olursa (Google bağlantısı kopması, kota, bozuk veri vb.)
     kırmızı teknik hata ekranı yerine anlaşılır bir mesaj gösterir; diğer sekmeler çalışmaya
@@ -308,6 +318,29 @@ def ogm_erisilebilir():
     except Exception:
         return False
 
+def ogm_getir(url, timeout=20, deneme=3):
+    """OGM'den sayfa/PDF indirir; bağlantı hatası, zaman aşımı ya da sunucu hatasında (5xx)
+    kısa beklemelerle 3 kez dener. OGM arka arkaya gelen isteklerde ara sıra cevap vermiyor —
+    eskiden tek başarısız istek o partinin miktarını/kuturunu sessizce 0 yapıyordu."""
+    import time
+    son_hata = None
+    for i in range(deneme):
+        try:
+            cevap = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, verify=False, timeout=timeout)
+            if cevap.status_code >= 500:
+                raise requests.exceptions.HTTPError(f"OGM sunucu hatası {cevap.status_code}", response=cevap)
+            if cevap.status_code == 200:
+                return cevap
+            if cevap.status_code in (429,):
+                raise requests.exceptions.HTTPError("OGM çok fazla istek dedi (429)", response=cevap)
+            return cevap  # 404 vb.: tekrar denemenin anlamı yok, çağıran taraf kontrol ediyor
+        except requests.exceptions.RequestException as e:
+            son_hata = e
+            print(f"[UYARI] OGM isteği başarısız ({i + 1}/{deneme}): {url} — {e}", file=sys.stderr)
+            if i < deneme - 1:
+                time.sleep(1.5 * (i + 1))
+    raise son_hata
+
 class OgmSayfaHatasi(Exception):
     pass
 
@@ -501,6 +534,7 @@ tab_gecmis, tab_odeme, tab_nakliye, tab_radar, tab_islem = st.tabs([
 @st.fragment
 def _sekme_islem():
     with guvenli_bolum("Yeni İhale Çek"):
+        kalici_bildirimleri_goster("islem")
         st.subheader("📥 Yeni İhale Ekle / Çek")
         islem_turu = st.radio("İşlem Türü Seçin:", ["🔗 OGM Sonuç Linkinden Toplu Çek (Bot)", "📄 İhale Öncesi PDF'den Hesapla (yakında)"])
 
@@ -560,9 +594,9 @@ def _sekme_islem():
                     if onizleme_yer:
                         st.caption(f"{_on_ek}📍 Tespit edilen yer: **{onizleme_yer}**")
                     elif onizleme_hata == "timeout":
-                        st.caption(f"{_on_ek}⏱️ OGM sunucusu 15 saniye içinde cevap vermedi (site yavaş olabilir). 'Kazandıklarımızı Çek ve Kaydet' yine de denenebilir, o 20 saniye bekliyor.")
+                        st.warning(f"{_on_ek}⏱️ OGM sunucusu 15 saniye içinde cevap vermedi (site yavaş olabilir). 'Kazandıklarımızı Çek ve Kaydet' yine de denenebilir, 3 kez tekrar deniyor.")
                     else:
-                        st.caption(f"{_on_ek}⚠️ Linkten yer bilgisi tespit edilemedi (link hatalı olabilir ya da ihale henüz sonuçlanmamış).")
+                        st.warning(f"{_on_ek}⚠️ Linkten yer bilgisi tespit edilemedi (link hatalı olabilir ya da ihale henüz sonuçlanmamış).")
             # -------------------------------------------------------------
 
             if st.button("Kazandıklarımızı Çek ve Kaydet", type="primary", use_container_width=True):
@@ -589,8 +623,7 @@ def _sekme_islem():
                             if len(linkler) > 1:
                                 st.markdown(f"---\n**🔗 {_link_no}/{len(linkler)}. ihale:** {ihale_linki}")
                             try:
-                                headers = {'User-Agent': 'Mozilla/5.0'}
-                                res = requests.get(ihale_linki, headers=headers, verify=False, timeout=20)
+                                res = ogm_getir(ihale_linki, timeout=20)
                                 if res.status_code != 200:
                                     raise OgmSayfaHatasi(res.status_code)
                                 soup = BeautifulSoup(res.text, 'html.parser')
@@ -685,12 +718,32 @@ def _sekme_islem():
 
                                                 alan_firma = "Necati Keleş" if "NECATİ KELEŞ" in row_text else "Keleş Ahşap"
 
+                                                # --- MİKTAR ve ADET: doğrudan sonuç tablosundan ---
+                                                # Sonuç sayfasında miktar tam değeriyle duruyor (<span data-value="5.355">).
+                                                # Eskiden miktar sadece PDF'ten okunuyordu; PDF o an inmezse ya da biçimi
+                                                # değişirse (m3 → m³) miktar sessizce 0 yazılıyordu.
+                                                parti_notlari = []  # bu partide ters giden her şey, kullanıcıya gösterilecek
+                                                _miktar_span = row.find(attrs={"data-value": True})
+                                                if _miktar_span:
+                                                    try:
+                                                        miktar_float = float(_miktar_span["data-value"])
+                                                    except (ValueError, TypeError):
+                                                        miktar_float = 0.0
+                                                tablo_adet = 0
+                                                _adet_metni = re.sub(r'\D', '', cols[3].get_text(strip=True)) if len(cols) > 3 else ""
+                                                if _adet_metni:
+                                                    tablo_adet = int(_adet_metni)
+
+                                                # --- KUTUR ve BASKIN BOY: İstif Ebat Listesi PDF'inden ---
+                                                t_adet = 0
                                                 detay_a = row.find('a', href=True)
-                                                if detay_a:
+                                                if not detay_a:
+                                                    parti_notlari.append("detay sayfası linki bulunamadı (kutur PDF'ten okunamadı)")
+                                                else:
                                                     detay_linki = urljoin(ihale_linki, detay_a['href'])
                                                     pdf_isim = None
                                                     try:
-                                                        d_res = requests.get(detay_linki, headers=headers, verify=False, timeout=15)
+                                                        d_res = ogm_getir(detay_linki, timeout=15)
                                                         d_soup = BeautifulSoup(d_res.text, 'html.parser')
 
                                                         pdf_link = None
@@ -699,36 +752,35 @@ def _sekme_islem():
                                                                 pdf_link = urljoin(detay_linki, a_tag['href'])
                                                                 break
 
-                                                        if pdf_link:
-                                                            p_res = requests.get(pdf_link, headers=headers, verify=False, timeout=20)
+                                                        if not pdf_link:
+                                                            parti_notlari.append("detay sayfasında İstif Ebat Listesi PDF'i bulunamadı")
+                                                        else:
+                                                            p_res = ogm_getir(pdf_link, timeout=20)
                                                             # Benzersiz dosya adı: aynı anda iki kullanıcı/sekme bot
-                                                            # çalıştırırsa aynı parti_no ile çakışıp birbirinin PDF'ini
-                                                            # bozmasın diye (parti_no tek başına eşsiz olmayabiliyor).
+                                                            # çalıştırırsa birbirinin PDF'ini bozmasın diye.
                                                             pdf_isim = f"temp_bot_{uuid.uuid4().hex}.pdf"
                                                             with open(pdf_isim, "wb") as f:
                                                                 f.write(p_res.content)
 
                                                             with pdfplumber.open(pdf_isim) as pdf:
-                                                                pdf_text = pdf.pages[0].extract_text()
+                                                                pdf_text = pdf.pages[0].extract_text() or ""
 
-                                                                m3_match = re.search(r'Miktar\s*\(m3\)\s*[:\-]?\s*([\d\.,]+)', pdf_text, re.IGNORECASE)
-                                                                if m3_match:
-                                                                    temiz_m3 = m3_match.group(1).replace('.', '').replace(',', '.')
-                                                                    try: miktar_float = float(temiz_m3)
-                                                                    except: pass
-
+                                                                # Miktar tablodan okunamadıysa PDF başlığındaki "Miktar (m³) : 5,355" (m3 de olabilir)
                                                                 if miktar_float == 0.0:
-                                                                    m3_matches = re.findall(r'([\d\.,]+)\s*(?:m3|M3|m³)', pdf_text)
-                                                                    if m3_matches:
-                                                                        temiz_m3 = m3_matches[-1].replace('.', '').replace(',', '.')
-                                                                        try: miktar_float = float(temiz_m3)
-                                                                        except: pass
+                                                                    m3_match = re.search(r'Miktar\s*\(m(?:3|³)\)\s*[:\-]?\s*([\d\.,]+)', pdf_text, re.IGNORECASE)
+                                                                    if m3_match:
+                                                                        try:
+                                                                            miktar_float = float(m3_match.group(1).replace('.', '').replace(',', '.'))
+                                                                        except ValueError:
+                                                                            pass
 
-                                                                table_pdf = pdf.pages[0].extract_table()
                                                                 caplar = []
                                                                 boy_adet = {}
-                                                                t_adet = 0
-                                                                if table_pdf and len(table_pdf) > 1:
+                                                                # Uzun listeler birden fazla sayfaya taşabiliyor — tüm sayfaların tablosu okunuyor.
+                                                                for _sayfa in pdf.pages:
+                                                                    table_pdf = _sayfa.extract_table()
+                                                                    if not table_pdf or len(table_pdf) < 2:
+                                                                        continue
                                                                     baslik = [str(h).strip().lower() if h else '' for h in table_pdf[0]]
 
                                                                     def _kolon_bul(anahtar_kelimeler):
@@ -740,7 +792,6 @@ def _sekme_islem():
                                                                     cap_idx = _kolon_bul(['çap'])
                                                                     boy_idx = _kolon_bul(['boy'])
                                                                     adet_idx = _kolon_bul(['adet'])
-
                                                                     if cap_idx is None: cap_idx = 1
                                                                     if boy_idx is None: boy_idx = 2
                                                                     if adet_idx is None: adet_idx = 3
@@ -748,45 +799,34 @@ def _sekme_islem():
                                                                     for p_row in table_pdf[1:]:
                                                                         if len(p_row) <= max(cap_idx, boy_idx, adet_idx):
                                                                             continue
-                                                                        # PDF'deki "Toplam" özet satırını atla — Çap/Boy hücreleri boş
-                                                                        # (None) olur ama Adet hücresinde genel toplam adet yazar;
-                                                                        # bu satır dahil edilirse t_adet şişip %80 kuralı hiç
-                                                                        # tutturulamıyordu (gerçek oranlar yanlışlıkla sulanıyordu).
+                                                                        # "Toplam" özet satırını atla (boy boş, adette genel toplam yazar).
                                                                         if p_row[boy_idx] is None or str(p_row[boy_idx]).strip() == '' or 'toplam' in str(p_row[0]).strip().lower():
                                                                             continue
-
-                                                                        try:
-                                                                            raw_adet = str(p_row[adet_idx]).strip()
-                                                                            adet_match = re.search(r'\d+', raw_adet.replace('.', ''))
-                                                                            if not adet_match: continue
-                                                                            adet = int(adet_match.group())
-                                                                        except:
+                                                                        adet_match = re.search(r'\d+', str(p_row[adet_idx]).strip().replace('.', ''))
+                                                                        if not adet_match:
                                                                             continue
-                                                                        
+                                                                        adet = int(adet_match.group())
                                                                         t_adet += adet
-                                                                    
-                                                                        try:
-                                                                            raw_b = str(p_row[boy_idx]).strip().replace(',', '.')
-                                                                            b_match = re.search(r'[\d\.]+', raw_b)
-                                                                            if b_match:
-                                                                                f_b = float(b_match.group())
-                                                                                s_b = str(f_b)
+
+                                                                        b_match = re.search(r'[\d\.]+', str(p_row[boy_idx]).strip().replace(',', '.'))
+                                                                        if b_match:
+                                                                            try:
+                                                                                s_b = str(float(b_match.group()))
                                                                                 t_boy = s_b[:-2] if s_b.endswith('.0') else s_b
                                                                                 boy_adet[t_boy] = boy_adet.get(t_boy, 0) + adet
-                                                                        except:
-                                                                            pass
-                                                                        
-                                                                        try:
-                                                                            raw_cap = str(p_row[cap_idx]).strip().replace(',', '.')
-                                                                            c_match = re.search(r'[\d\.]+', raw_cap)
-                                                                            if c_match:
+                                                                            except ValueError:
+                                                                                pass
+
+                                                                        c_match = re.search(r'[\d\.]+', str(p_row[cap_idx]).strip().replace(',', '.'))
+                                                                        if c_match:
+                                                                            try:
                                                                                 cap = float(c_match.group())
                                                                                 if cap > 0:
                                                                                     caplar.extend([cap] * adet)
-                                                                        except:
-                                                                            pass
+                                                                            except ValueError:
+                                                                                pass
 
-                                                                # %80 KURALI
+                                                                # %80 KURALI: partinin %80'i tek boydaysa boy o kabul edilir
                                                                 if t_adet > 0:
                                                                     for b_deg, b_ad in boy_adet.items():
                                                                         if (b_ad / t_adet) >= 0.80:
@@ -796,35 +836,55 @@ def _sekme_islem():
                                                                 if caplar:
                                                                     hesaplanan_kutur = round(sum(caplar) / len(caplar), 2)
                                                                 else:
-                                                                    if t_adet > 0 and miktar_float > 0.0:
-                                                                        try:
-                                                                            h_boy = float(hesaplanan_boy)
-                                                                            if h_boy > 0:
-                                                                                import math
-                                                                                hesaplanan_kutur = round(math.sqrt((miktar_float * 40000) / (math.pi * h_boy * t_adet)), 2)
-                                                                        except:
-                                                                            pass
-
+                                                                    parti_notlari.append("PDF'teki çap tablosu okunamadı")
+                                                    except requests.exceptions.RequestException as e:
+                                                        print(f"[HATA] Parti {parti_no} detay/PDF indirilemedi: {e}", file=sys.stderr)
+                                                        parti_notlari.append(f"OGM'den detay sayfası/PDF 3 denemede de indirilemedi ({type(e).__name__})")
                                                     except Exception as e:
-                                                        pass
+                                                        print(f"[HATA] Parti {parti_no} PDF işlenemedi: {e}", file=sys.stderr)
+                                                        parti_notlari.append(f"PDF işlenemedi ({type(e).__name__}: {str(e)[:80]})")
                                                     finally:
-                                                        # PDF işlenirken ortada bir hata çıksa bile (bozuk PDF,
-                                                        # ayrıştırma hatası vb.) geçici dosya diskte unutulmasın.
+                                                        # Hata çıksa bile geçici dosya diskte unutulmasın.
                                                         if pdf_isim and os.path.exists(pdf_isim):
                                                             os.remove(pdf_isim)
+
+                                                # Kutur PDF'ten okunamadıysa miktar + adet + boydan tahmini hesap (silindir formülü).
+                                                if hesaplanan_kutur == 0.0:
+                                                    _adet_hesap = t_adet or tablo_adet
+                                                    try:
+                                                        _h_boy = float(str(hesaplanan_boy).replace(',', '.'))
+                                                    except ValueError:
+                                                        _h_boy = 0.0
+                                                    if _adet_hesap > 0 and miktar_float > 0 and _h_boy > 0:
+                                                        import math
+                                                        hesaplanan_kutur = round(math.sqrt((miktar_float * 40000) / (math.pi * _h_boy * _adet_hesap)), 2)
+                                                        parti_notlari.append(f"kutur PDF'ten okunamadığı için miktar/adet/boydan tahmini hesaplandı ({hesaplanan_kutur:g} cm)")
+                                                    else:
+                                                        parti_notlari.append("kutur hesaplanamadı, 0 kaydedildi")
+
+                                                if miktar_float == 0.0:
+                                                    parti_notlari.append("MİKTAR okunamadı, 0 kaydedildi")
+                                                if fiyat_int == 0:
+                                                    parti_notlari.append("FİYAT (verdiğimiz pey) okunamadı, 0 kaydedildi")
 
                                                 yeni_satir = [satir_ihale_tarihi, isletme_text, alan_firma, str(parti_no), cins, str(hesaplanan_boy), float(round(miktar_float, 3)), float(round(hesaplanan_kutur, 2)), "", int(fiyat_int), ""]  # Mesafe ve Nakliye Ücreti sütunları artık kullanılmıyor, boş bırakılıyor (sütun sırası kaymasın diye)
                                                 eklenecek_satirlar.append(yeni_satir)
                                                 mevcut_gecmis_set.add(kayit_id_bot)
-                                                if fiyat_int == 0 or miktar_float == 0.0:
-                                                    supheli_partiler.append(f"Parti {parti_no} ({cins}, {hesaplanan_boy}) — fiyat veya miktar 0 okundu")
+                                                if parti_notlari:
+                                                    supheli_partiler.append(f"Parti {parti_no} ({cins}, boy {hesaplanan_boy}): " + "; ".join(parti_notlari))
 
                                 if len(eklenecek_satirlar) > 0:
                                     sheet.append_rows(eklenecek_satirlar, value_input_option='USER_ENTERED')
                                     st.success(f"🎉 Helal olsun! {len(eklenecek_satirlar)} adet yeni ihale işlendi! (Zaten kayıtlı olan {atlanan_adet} parti atlandı).")
 
+                                    if isletme_text == "Bilinmeyen İşletme":
+                                        st.error("❌ Sayfada işletme adı (… OİM/OBM) bulunamadı — partiler 'Bilinmeyen İşletme' olarak kaydedildi. Google Sheets'te İşletme sütununu elle düzeltin.")
+                                    if genel_ihale_tarihi == "Tarih Bulunamadı":
+                                        st.error("❌ Sayfada ihale tarihi bulunamadı — Tarih sütununa 'Tarih Bulunamadı' yazıldı. Google Sheets'te elle düzeltin.")
                                     if supheli_partiler:
-                                        st.warning("⚠️ Şu partilerde fiyat veya miktar 0 olarak kaydedildi, sayfa/PDF ayrıştırması başarısız olmuş olabilir — lütfen Google Sheets'ten elle kontrol edin:\n\n" + "\n".join(f"- {p}" for p in supheli_partiler))
+                                        st.warning(f"⚠️ {len(supheli_partiler)} partide sorun var — kayıt yapıldı ama aşağıdaki değerleri Google Sheets'te kontrol edin:\n\n" + "\n".join(f"- {p}" for p in supheli_partiler))
+                                    else:
+                                        st.caption("✔️ Tüm partilerin miktar, fiyat, boy ve kutur bilgisi sorunsuz okundu.")
                                 elif atlanan_adet > 0:
                                     st.warning(f"Bu sayfadaki kazandığımız {atlanan_adet} partinin tümü zaten veritabanında var, o yüzden yeniden eklenmedi (Mükerrer koruması devrede).")
                                 elif not dogru_tablo:
@@ -855,6 +915,7 @@ with tab_islem:
 @st.fragment
 def _sekme_gecmis():
     with guvenli_bolum("Geçmiş Alımlar"):
+        kalici_bildirimleri_goster("gecmis")
         st.subheader("📊 Buluttaki Geçmiş Alımlar")
         
         if sheets_baglantisi:
@@ -902,7 +963,12 @@ def _sekme_gecmis():
                         # Tarih sütunu da gerçek tarih tipine çevrilmezse aynı şekilde
                         # alfabetik sıralanıp (10.09.2026, 2.06.2026'dan önce gelir gibi) yanlış sonuç verirdi.
                         if "Tarih" in df.columns:
-                            df["Tarih"] = pd.to_datetime(df["Tarih"], format='%d.%m.%Y', errors='coerce')
+                            _tarih_ham = df["Tarih"].astype(str).str.strip()
+                            df["Tarih"] = pd.to_datetime(_tarih_ham, format='%d.%m.%Y', errors='coerce')
+                            _bozuk_tarih = df[df["Tarih"].isna()]
+                            if not _bozuk_tarih.empty:
+                                _ornekler = ", ".join(f"{r.get('İşletme', '?')} Parti {r.get('Parti No', '?')} ('{_tarih_ham[i]}')" for i, r in _bozuk_tarih.head(8).iterrows())
+                                st.warning(f"⚠️ {len(_bozuk_tarih)} satırın tarihi okunamadı (GG.AA.YYYY olmalı) — bu satırlar tarih filtresinde ve sıralamada yanlış yerde görünür. Google Sheets'te (Sayfa1) düzeltin: {_ornekler}")
 
                         # Mesafe ve nakliye ücreti artık kullanılmıyor — Sheets'teki eski veriye
                         # dokunmadan sadece ekrandan/filtreden/Excel'den kaldırıyoruz.
@@ -1016,6 +1082,7 @@ with tab_gecmis:
 @st.fragment
 def _sekme_odeme():
     with guvenli_bolum("Kasa & Ödeme Takibi"):
+        kalici_bildirimleri_goster("odeme")
         st.subheader("💳 Kasa ve Son Ödeme Tarihi Takibi")
 
         if sheets_baglantisi:
@@ -1109,7 +1176,10 @@ def _sekme_odeme():
                 st.markdown("### ⏳ Son Ödeme Tarihi Yaklaşanlar (Tarih Sıralı)")
 
                 if not df_bekleyen.empty:
-                    df_bekleyen['Tarih_Formatli'] = pd.to_datetime(df_bekleyen['Son Ödeme Tarihi'], format='%d.%m.%Y', errors='coerce')
+                    df_bekleyen['Tarih_Formatli'] = pd.to_datetime(df_bekleyen['Son Ödeme Tarihi'].astype(str).str.strip(), format='%d.%m.%Y', errors='coerce')
+                    _bozuk_odeme = df_bekleyen[df_bekleyen['Tarih_Formatli'].isna()]
+                    if not _bozuk_odeme.empty:
+                        st.warning(f"⚠️ {len(_bozuk_odeme)} partinin son ödeme tarihi okunamadı — GECİKTİ uyarısı ve ödeme takvimi bu partiler için ÇALIŞMAZ. Google Sheets'te (Kasa_Takip) düzeltin: " + ", ".join(f"{r['İşletme']} Parti {r['Parti No']} ('{r['Son Ödeme Tarihi']}')" for _, r in _bozuk_odeme.head(8).iterrows()))
                     df_bekleyen = df_bekleyen.sort_values(by='Tarih_Formatli', ascending=True)
 
                     # Son ödeme tarihi geçmiş ama hâlâ ödenmemiş partiler gözden kaçmasın diye
@@ -1300,6 +1370,7 @@ def _sekme_odeme():
 
                         yeni_kayitlar = []
                         eklenen_adet = 0
+                        kasa_sorunlari = []
 
                         # NOT: re.DOTALL eklendi. OGM sayfasından kopyalanan tabloda hücreler arasına bazen
                         # görünmeyen bir satır sonu (newline) karakteri giriyor; "." varsayılan olarak newline'ı
@@ -1364,18 +1435,35 @@ def _sekme_odeme():
                                 
                                 kayit_id = f"{isletme}_{ihale_tarihi}_{parti_no}"
 
+                                _sorunlar = []
+                                if bulunan_boy == "-":
+                                    _sorunlar.append("boy Geçmiş Alımlar'da bulunamadı ('-' yazıldı — önce bu ihaleyi Yeni İhale Çek ile çekin ya da elle düzeltin)")
+                                if miktar == 0.0:
+                                    _sorunlar.append("miktar okunamadı (0)")
+                                if taksitli_tutar == 0.0:
+                                    _sorunlar.append("taksitli tutar okunamadı (0)")
+                                if birim_fiyat == 0.0:
+                                    _sorunlar.append("birim fiyat okunamadı (0)")
+
                                 if kayit_id not in mevcut_kayitlar:
+                                    if _sorunlar:
+                                        kasa_sorunlari.append(f"{isletme} Parti {parti_no}: " + "; ".join(_sorunlar))
                                     yeni_kayitlar.append([isletme, ihale_tarihi, parti_no, cinsi, bulunan_boy, miktar, birim_fiyat, taksitli_tutar, nakit_tutar, son_tarih, "BEKLİYOR", "", "", "", bulunan_firma, "", "", "", ""])
                                     mevcut_kayitlar.add(kayit_id)
                                     eklenen_adet += 1
                             except Exception as e:
                                 islenemedi_count += 1
                                 son_hata = f"{type(e).__name__}: {e}"
+                                print(f"[HATA] Kasa yapıştırma satırı işlenemedi: {son_hata}", file=sys.stderr)
                                 continue
                                 
                         if yeni_kayitlar:
                             kasa_sheet.append_rows(yeni_kayitlar, value_input_option='USER_ENTERED')
-                            bildir(f"🎉 Harika! {eklenen_adet} adet parti ({firma_secimi}, İşletme+Parti No kontrolünden geçerek) Kasaya eklendi.")
+                            kalici_bildir("odeme", f"🎉 {eklenen_adet} adet parti ({firma_secimi}) Kasaya eklendi.", "success")
+                            if kasa_sorunlari:
+                                kalici_bildir("odeme", f"⚠️ Eklenen partilerden {len(kasa_sorunlari)} tanesinde eksik/okunamayan bilgi var — Google Sheets'te (Kasa_Takip) kontrol edin:\n\n" + "\n".join(f"- {x}" for x in kasa_sorunlari))
+                            if islenemedi_count:
+                                kalici_bildir("odeme", f"❌ Yapıştırılan metinde {islenemedi_count} parti satırı okunamadı ve kasaya EKLENMEDİ (son hata: `{son_hata}`). Bu partileri kontrol edip tekrar yapıştırın.", "error")
                             st.rerun()
                         elif found_count == 0:
                             st.error("❌ Yapıştırılan metinde tanınabilir hiçbir parti satırı bulunamadı. OGM 'Parti Satış' ekranındaki tabloyu (başlıklar dahil) tam olarak kopyaladığınızdan emin olun.")
@@ -1397,6 +1485,7 @@ with tab_odeme:
 @st.fragment
 def _sekme_nakliye():
     with guvenli_bolum("Nakliye Takibi"):
+        kalici_bildirimleri_goster("nakliye")
         st.subheader("🚚 Nakliye Takibi")
         st.info("Ödemesi tamamlanmış partiler burada listelenir. Tamamı bir seferde çekildiyse toplu işaretle; sadece bir kısmı çekildiyse (örn. 80 m³'lük partiden 40 m³) kısmi çekim bölümünü kullan — kalan miktar otomatik takip edilir.")
 
@@ -1608,9 +1697,13 @@ def _sekme_nakliye():
                                         kasa_sheet.update_cells(yazilacak_hucreler, value_input_option='USER_ENTERED')
 
                                     if secilen_nakliyeci:
-                                        if secilen_nakliyeci not in nakliyeci_secenekler:
-                                            nakliyeci_sheet.append_row([secilen_nakliyeci])
-                                        nakliyeci_cari_ekle(spreadsheet, secilen_nakliyeci, cari_kayitlar)
+                                        try:
+                                            if secilen_nakliyeci not in nakliyeci_secenekler:
+                                                nakliyeci_sheet.append_row([secilen_nakliyeci])
+                                            nakliyeci_cari_ekle(spreadsheet, secilen_nakliyeci, cari_kayitlar)
+                                        except Exception as e:
+                                            print(f"[HATA] Nakliyeci carisi yazılamadı: {e}", file=sys.stderr)
+                                            kalici_bildir("nakliye", f"❌ Çekim Kasa'ya kaydedildi AMA '{secilen_nakliyeci}' nakliyecisinin cari sekmesine yazılamadı ({type(e).__name__}: {str(e)[:120]}). Google Sheets'te 'Cari_{secilen_nakliyeci}' sekmesine bu seferki çekimi elle ekleyin:\n\n" + "\n".join(f"- {k[1]} Parti {k[3]}: {k[6]:g} m³, {k[7]:g} TL/m³" for k in cari_kayitlar), "error")
 
                                     bildir("✅ Kaydedildi:\n\n" + "\n".join(f"- {o}" for o in ozet))
                                     st.rerun()
@@ -1737,7 +1830,7 @@ def _sekme_nakliye():
                         # bir sonraki açılışta (değişen sekmeler hafızada işaretlenmediği için) tekrar denenir.
                         print(f"[HATA] Drive senkronizasyonu: {e}", file=sys.stderr)
                         traceback.print_exc(file=sys.stderr)
-                        st.caption("☁️ Drive sekmeleri şu an güncellenemedi (Google geçici olarak yoğun). Birazdan otomatik tekrar denenecek — aşağıdaki Excel indirme her zaman çalışır.")
+                        st.warning(f"☁️ Drive'daki 'Nakliye_Tümü' ve ihale sekmeleri şu an güncellenemedi ({type(e).__name__}). Sayfa bir sonraki açılışta otomatik tekrar deneyecek — aşağıdaki Excel indirme her zaman çalışır.")
 
                     # --- İŞLETME + İHALE TARİHİ KOMBİNASYONUNA GÖRE AYRI SEKMELİ EXCEL İNDİRME (opsiyonel, ekstra) ---
                     # Aynı yer (Örn. ALADAĞ) farklı tarihlerde birden fazla ihale olabilir; bunları
