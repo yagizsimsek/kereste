@@ -142,27 +142,7 @@ def main():
             break
 
     if not tarama_basarili:
-        log(f"⚠️ Tarama hiç başarılı olamadı ({son_hata}) — kontrol maili gönderiliyor.")
-        try:
-            uyari_msg = MIMEMultipart()
-            uyari_msg['From'] = GMAIL_USER
-            uyari_msg['To'] = RECEIVER_EMAIL
-            uyari_msg['Subject'] = f"⚠️ {bugun} OGM Radarı Çalışamadı"
-            uyari_msg.attach(MIMEText(
-                f"<html><body style='font-family: Arial, sans-serif;'>"
-                f"<p>Bugünkü OGM taraması teknik bir sorun nedeniyle hiç tamamlanamadı, "
-                f"bu <b>'ihale yok'</b> anlamına gelmiyor olabilir — lütfen siteyi elle kontrol et.</p>"
-                f"<p>Hata: <code>{son_hata}</code></p></body></html>",
-                'html'
-            ))
-            server = smtplib.SMTP('smtp.gmail.com', 587)
-            server.starttls()
-            server.login(GMAIL_USER, GMAIL_PASSWORD)
-            server.send_message(uyari_msg)
-            server.quit()
-            log("✅ Kontrol maili gönderildi.")
-        except Exception as e:
-            log(f"❌ Kontrol maili de gönderilemedi: {e}")
+        log(f"⚠️ Tarama hiç başarılı olamadı ({son_hata}).")
     elif bulunan_ihaleler:
         log(f"🎯 {len(bulunan_ihaleler)} adet ihale bulundu, mail hazırlanıyor...")
         mail_icerik = f"""
