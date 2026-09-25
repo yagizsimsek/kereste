@@ -187,6 +187,21 @@ def siralanabilir_yap(df, sayi_kolonlari=None, tarih_kolonlari=None):
             df[kol] = pd.to_datetime(df[kol], format='%d.%m.%Y', errors='coerce')
     return df
 
+FIRMA_SECENEKLERI = ["Necati Keleş", "Keleş Ahşap", "İkisi de"]
+
+def firma_filtrele(df, kolon="Alan Firma"):
+    """Sayfanın üstündeki firma seçimine göre sadece EKRANDA gösterilecek satırları süzer.
+    SheetRow sütunu korunduğu için süzülmüş tablolardan yapılan yazmalar yine doğru satıra gider.
+    Firması boş satırlar tek firma seçiliyken gizlenir; kaç tane olduğu ekranda söylenir."""
+    secim = st.session_state.get("firma_filtresi", "İkisi de")
+    if secim == "İkisi de" or df.empty or kolon not in df.columns:
+        return df
+    firma = df[kolon].astype(str).str.strip().apply(tr_upper)
+    bos = int((firma == "").sum())
+    if bos:
+        st.caption(f"ℹ️ {bos} satırda 'Alan Firma' boş olduğu için {secim} filtresinde görünmüyor. Görmek için 'İkisi de'yi seçin ya da Google Sheets'te firmayı doldurun.")
+    return df[firma == tr_upper(secim)]
+
 def yeniden_eskiye(df, tarih_kolonu):
     """Tabloyu en yeni tarih en üstte olacak şekilde sıralar. Aynı tarihli satırlarda
     Sheets'e sonradan eklenen (daha yeni kayıt) üstte kalır. Tarihi okunamayanlar en alta."""
@@ -515,6 +530,19 @@ def satirlar_degismedi_mi(taze_veri, gorulen_veri, satir_nolari):
     return True
 
 TABLO_DEGISTI_MESAJI = "🔄 Bu kayıt siz ekrandayken değişmiş (başka biri işlem yapmış ya da tablo elle düzenlenmiş). Yanlış satıra yazılmasın diye işlem yapılmadı — sayfa yenilendi, lütfen kontrol edip tekrar deneyin."
+
+# --- FİRMA FİLTRESİ: her sekmenin üstünde sabit; seçim adres çubuğunda da tutuluyor ki
+# sayfa yenilenince (ya da yer imiyle açılınca) sıfırlanmasın.
+if "firma_filtresi" not in st.session_state:
+    _adres_firma = st.query_params.get("firma", "İkisi de")
+    st.session_state["firma_filtresi"] = _adres_firma if _adres_firma in FIRMA_SECENEKLERI else "İkisi de"
+_firma_cols = st.columns(len(FIRMA_SECENEKLERI))
+for _col, _firma in zip(_firma_cols, FIRMA_SECENEKLERI):
+    _secili = st.session_state["firma_filtresi"] == _firma
+    if _col.button(("✅ " if _secili else "") + _firma, key=f"firma_btn_{_firma}", type="primary" if _secili else "secondary", use_container_width=True):
+        st.session_state["firma_filtresi"] = _firma
+        st.query_params["firma"] = _firma
+        st.rerun()
 
 bildirimleri_goster()
 
@@ -966,6 +994,7 @@ def _sekme_gecmis():
                         df = df.drop(columns=[c for c in ["Mesafe (KM)", "Nakliye Ücreti (TL/m³)"] if c in df.columns])
 
                         df = yeniden_eskiye(df, "Tarih").reset_index(drop=True)
+                        df = firma_filtrele(df).reset_index(drop=True)
                         df_filtered = df.copy()
 
                         st.markdown("##### 🔍 Tabloyu Filtrele")
@@ -1081,7 +1110,7 @@ def _sekme_odeme():
             # --- TABLO SÜTUN ONARICI ---
             kasa_data = kasa_sheet.get_all_values()
             headers = kasa_data[0] if len(kasa_data) > 0 else []
-            ideal_headers = ["İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not", "Nakliye Durumu", "Nakliye Notu", "Alan Firma", "Çekilen Miktar", "Fatura", "Nakliye Ücreti", "Nakliyeci", "OGM Fatura"]
+            ideal_headers = ["İşletme", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not", "Nakliye Durumu", "Nakliye Notu", "Alan Firma", "Çekilen Miktar", "Fatura", "Nakliye Ücreti", "Nakliyeci", "OGM Fatura", "Satış Tarihi"]
 
             if kasa_sheet.col_count < len(ideal_headers):
                 kasa_sheet.add_cols(len(ideal_headers) - kasa_sheet.col_count)
@@ -1100,6 +1129,7 @@ def _sekme_odeme():
                 df_kasa = pd.DataFrame(kasa_data[1:], columns=headers)
                 df_kasa['SheetRow'] = df_kasa.index + 2
                 df_kasa['_DurumTemiz'] = df_kasa["Durum"].astype(str).str.strip().apply(tr_upper)
+                df_kasa = firma_filtrele(df_kasa)
 
                 df_bekleyen = df_kasa[df_kasa['_DurumTemiz'] != "ÖDENDİ"].copy()
 
@@ -1206,7 +1236,7 @@ def _sekme_odeme():
 
                     st.markdown("### ✅ Ödemeyi Gerçekleştir ve Listeden Sil")
 
-                    col_secim, col_not, col_btn = st.columns([2, 2, 1])
+                    col_secim, col_not, col_tarih, col_btn = st.columns([2, 2, 1, 1])
 
                     with col_secim:
                         secenekler = []
@@ -1219,6 +1249,9 @@ def _sekme_odeme():
                     with col_not:
                         islem_notu = st.text_input("Satış / Ödeme Notu Ekle", placeholder="Örn: Ziraat Kartından Nakit İndirimli Çekildi")
 
+                    with col_tarih:
+                        satis_tarihi = st.date_input("Satış Tarihi", value=simdi().date(), format="DD.MM.YYYY", key="odeme_satis_tarihi")
+
                     with col_btn:
                         st.write("")
                         st.write("")
@@ -1229,6 +1262,7 @@ def _sekme_odeme():
                                 gercek_satir_nolari = [int(x.split("|")[0].replace("Satır", "").strip()) for x in secilen_islemler]
                                 durum_col_num = headers.index("Durum") + 1
                                 not_col_num = headers.index("Not") + 1
+                                satis_col_num = headers.index("Satış Tarihi") + 1
 
                                 with st.spinner("Ödeme Google Sheets'e işleniyor..."):
                                     if not satirlar_degismedi_mi(kasa_sheet.taze_satirlar(), kasa_data, gercek_satir_nolari):
@@ -1240,6 +1274,7 @@ def _sekme_odeme():
                                     for _satir_no in gercek_satir_nolari:
                                         _odeme_hucreleri.append(gspread.Cell(_satir_no, durum_col_num, "ÖDENDİ"))
                                         _odeme_hucreleri.append(gspread.Cell(_satir_no, not_col_num, islem_notu))
+                                        _odeme_hucreleri.append(gspread.Cell(_satir_no, satis_col_num, satis_tarihi.strftime('%d.%m.%Y') if satis_tarihi else ""))
                                     kasa_sheet.update_cells(_odeme_hucreleri, value_input_option='USER_ENTERED')
 
                                     bildir(f"✅ {len(gercek_satir_nolari)} partinin ödemesi işlendi ve arşive aktarıldı!")
@@ -1259,16 +1294,17 @@ def _sekme_odeme():
                         df_odenen["OGM Fatura"] = df_odenen["OGM Fatura"].astype(str).str.strip().apply(tr_upper) == "EVET"
                     else:
                         df_odenen["OGM Fatura"] = False
-                    arsiv_kolonlar_kasa = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not", "OGM Fatura"] if c in df_odenen.columns]
+                    arsiv_kolonlar_kasa = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Satış Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Durum", "Not", "OGM Fatura"] if c in df_odenen.columns]
                     gorsel_df_odenen = siralanabilir_yap(
                         df_odenen[arsiv_kolonlar_kasa],
                         sayi_kolonlari=["Parti No", "Miktar", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar"],
-                        tarih_kolonlari=["İhale Tarihi", "Son Ödeme Tarihi"],
+                        tarih_kolonlari=["İhale Tarihi", "Satış Tarihi", "Son Ödeme Tarihi"],
                     )
                     _odenen_column_config = siralama_column_config(
                         sayi_format_kolonlari={"Parti No": "%d", "Miktar": "%.3f", "Birim Fiyat": "%.2f", "Taksitli Tutar": "%.2f", "Nakit Tutar": "%.2f"},
-                        tarih_kolonlari=["İhale Tarihi", "Son Ödeme Tarihi"],
+                        tarih_kolonlari=["İhale Tarihi", "Satış Tarihi", "Son Ödeme Tarihi"],
                     )
+                    _odenen_column_config["Satış Tarihi"] = st.column_config.DateColumn("📅 Satış Tarihi", format="DD.MM.YYYY", help="Ödemenin yapıldığı / satışın gerçekleştiği gün. Boşsa hücreye tıklayıp girebilirsiniz.")
                     _odenen_column_config["OGM Fatura"] = st.column_config.CheckboxColumn("🧾 OGM Faturası Geldi mi?", help="OGM'den bu partinin faturası geldiğinde tikleyin.")
                     # Anahtar içeriğe bağlı (nakliye faturasındaki gibi): satırlar kayınca eski bir tik
                     # başka bir partiye uygulanmasın.
@@ -1278,7 +1314,7 @@ def _sekme_odeme():
                     duzenlenen_odenen = st.data_editor(
                         gorsel_df_odenen,
                         column_config=_odenen_column_config,
-                        disabled=[c for c in arsiv_kolonlar_kasa if c != "OGM Fatura"],
+                        disabled=[c for c in arsiv_kolonlar_kasa if c not in ("OGM Fatura", "Satış Tarihi")],
                         hide_index=True,
                         use_container_width=True,
                         key=_ogm_fatura_key,
@@ -1293,10 +1329,19 @@ def _sekme_odeme():
                                     int(df_odenen.iloc[i]["SheetRow"]), _ogm_fatura_col,
                                     "EVET" if duzenlenen_odenen.iloc[i]["OGM Fatura"] else "",
                                 ))
+                        if "Satış Tarihi" in headers and "Satış Tarihi" in gorsel_df_odenen.columns:
+                            _satis_col = headers.index("Satış Tarihi") + 1
+                            for i in range(len(gorsel_df_odenen)):
+                                _eski = pd.to_datetime(gorsel_df_odenen.iloc[i]["Satış Tarihi"], errors="coerce")
+                                _yeni = pd.to_datetime(duzenlenen_odenen.iloc[i]["Satış Tarihi"], errors="coerce")
+                                _eski_metin = "" if pd.isna(_eski) else _eski.strftime('%d.%m.%Y')
+                                _yeni_metin = "" if pd.isna(_yeni) else _yeni.strftime('%d.%m.%Y')
+                                if _eski_metin != _yeni_metin:
+                                    _ogm_fatura_hucreleri.append(gspread.Cell(int(df_odenen.iloc[i]["SheetRow"]), _satis_col, _yeni_metin))
                         if _ogm_fatura_hucreleri:
                             if satirlar_degismedi_mi(kasa_sheet.taze_satirlar(), kasa_data, [c.row for c in _ogm_fatura_hucreleri]):
                                 kasa_sheet.update_cells(_ogm_fatura_hucreleri, value_input_option='USER_ENTERED')
-                                bildir("✅ OGM fatura durumu kaydedildi.")
+                                bildir("✅ Arşivdeki değişiklik (OGM fatura / satış tarihi) kaydedildi.")
                             else:
                                 bildir(TABLO_DEGISTI_MESAJI, "warning")
                             st.rerun()
@@ -1514,6 +1559,11 @@ def _sekme_nakliye():
                 else:
                     df_nakliye['_CekilenM3'] = 0.0
                 df_nakliye['Kalan Miktar'] = (df_nakliye['_ToplamM3'] - df_nakliye['_CekilenM3']).clip(lower=0).round(3)
+
+                # Drive'daki 'Nakliye_Tümü' ve ihale sekmeleri HER ZAMAN iki firmanın tüm verisiyle
+                # yazılmalı — firma filtresi sadece ekranı süzer, Drive'ı değil.
+                df_odemesi_biten_tum = df_nakliye[df_nakliye['_DurumTemiz'] == "ÖDENDİ"].copy()
+                df_nakliye = firma_filtrele(df_nakliye)
 
                 df_odemesi_biten = df_nakliye[df_nakliye['_DurumTemiz'] == "ÖDENDİ"].copy()
                 df_bekleyen_nakliye = df_odemesi_biten[df_odemesi_biten['_NakliyeTemiz'] != "NAKLİYE YAPILDI"].copy()
@@ -1766,8 +1816,8 @@ def _sekme_nakliye():
                 # muhasebeciye/işletmeye "bu ihalede 4 parti aldık, 2'si çekildi" gibi TÜM
                 # tabloyu göstermek için ödemesi yapılmış HER partiyi (çekilsin ya da çekilmesin)
                 # durum etiketiyle birlikte ayrı bir tabloda tutuyoruz.
-                if not df_odemesi_biten.empty:
-                    df_ihale_ozet = yeniden_eskiye(df_odemesi_biten, "İhale Tarihi").reset_index(drop=True)
+                def _ihale_ozet_yap(df_odenmis):
+                    df_ihale_ozet = yeniden_eskiye(df_odenmis, "İhale Tarihi").reset_index(drop=True)
 
                     def _nakliye_durumu_ozetle(v):
                         v = tr_upper(str(v).strip())
@@ -1786,6 +1836,10 @@ def _sekme_nakliye():
 
                     ihale_ozet_kolonlar = [c for c in ["İşletme", "Alan Firma", "İhale Tarihi", "Parti No", "Cinsi", "Boy", "Miktar", "Kalan Miktar", "Nakliye Durumu Özeti", "Birim Fiyat", "Taksitli Tutar", "Nakit Tutar", "Son Ödeme Tarihi", "Nakliye Ücreti", "Nakliyeci", "Nakliye Notu", "Fatura"] if c in df_ihale_ozet.columns]
                     df_ihale_ozet = df_ihale_ozet[ihale_ozet_kolonlar]
+                    return df_ihale_ozet
+
+                if not df_odemesi_biten.empty:
+                    df_ihale_ozet = _ihale_ozet_yap(df_odemesi_biten)
 
                     st.markdown("---")
                     st.markdown("### 📋 İhale Bazlı Tam Tablo (Çekilen + Eksik Tüm Partiler)")
@@ -1808,10 +1862,10 @@ def _sekme_nakliye():
                     )
 
                     st.markdown("#### ☁️ Ana Drive Dosyasına Otomatik Aktarım")
-                    st.caption("Bu tablo, 'Kereste_İhale_Sistemi' dosyasında 'Nakliye_Tümü' sekmesine ve her ihale (İşletme + İhale Tarihi) için kendi ayrı sekmesine otomatik olarak işleniyor — indirmene gerek yok, Drive'da hep güncel duruyor.")
+                    st.caption("Bu tablo, 'Kereste_İhale_Sistemi' dosyasında 'Nakliye_Tümü' sekmesine ve her ihale (İşletme + İhale Tarihi) için kendi ayrı sekmesine otomatik olarak işleniyor — indirmene gerek yok, Drive'da hep güncel duruyor. Drive'a her zaman iki firmanın tüm partileri yazılır; üstteki firma seçimi sadece ekranı ve Excel indirmeyi etkiler.")
                     try:
                         with st.spinner("Drive'daki sekmeler kontrol ediliyor..."):
-                            _senkron_oldu = nakliye_drive_senkronize(spreadsheet, df_ihale_ozet)
+                            _senkron_oldu = nakliye_drive_senkronize(spreadsheet, _ihale_ozet_yap(df_odemesi_biten_tum))
                         if _senkron_oldu:
                             st.success("✅ Drive'daki 'Nakliye_Tümü' ve ihale bazlı sekmeler güncellendi.")
                         else:
@@ -1850,6 +1904,13 @@ def _sekme_nakliye():
                         file_name=f"nakliye_arsiv_{simdi().strftime('%Y%m%d')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
+                elif not df_odemesi_biten_tum.empty:
+                    # Seçili firmanın ödenmiş partisi yok ama diğerinin var — Drive yine güncel kalsın.
+                    try:
+                        nakliye_drive_senkronize(spreadsheet, _ihale_ozet_yap(df_odemesi_biten_tum))
+                    except Exception as e:
+                        print(f"[HATA] Drive senkronizasyonu: {e}", file=sys.stderr)
+                        st.warning(f"☁️ Drive'daki 'Nakliye_Tümü' ve ihale sekmeleri şu an güncellenemedi ({type(e).__name__}). Sayfa bir sonraki açılışta otomatik tekrar deneyecek.")
             else:
                 st.info("Kasa henüz boş ya da veri okunamadı. Önce '💳 Kasa & Ödeme Takibi' sekmesinden veri ekle.")
 
